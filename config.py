@@ -1,0 +1,56 @@
+"""
+config.py
+─────────
+Central configuration module. Loads all environment variables once at startup
+and exposes them as typed module-level constants.
+
+Every other module imports from here instead of calling os.getenv() directly,
+so there is one place to audit what secrets the bot uses and the bot fails
+fast at launch with a clear error if anything is missing.
+"""
+
+import os
+
+from dotenv import load_dotenv
+
+# Load variables from the .env file into the process environment.
+# Has no effect in production if variables are already set (e.g. via Cloud Run secrets).
+load_dotenv()
+
+
+def _require(name: str) -> str:
+    """
+    Return the value of an environment variable.
+    Raises RuntimeError with a helpful message if the variable is missing or empty.
+    """
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required environment variable: {name}\n"
+            f"Add it to your .env file. See .env.example for reference."
+        )
+    return value
+
+
+# ─── Discord ──────────────────────────────────────────────────────────────────
+
+DISCORD_TOKEN: str = _require("DISCORD_TOKEN")
+
+# When set, slash commands sync instantly to this guild (great for dev).
+# When absent, commands sync globally (all servers, up to 1-hour delay).
+DEV_GUILD_ID: int | None = (
+    int(os.getenv("DEV_GUILD_ID")) if os.getenv("DEV_GUILD_ID") else None
+)
+
+# ─── Anthropic ────────────────────────────────────────────────────────────────
+
+ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
+
+# ─── Spotify ──────────────────────────────────────────────────────────────────
+
+SPOTIFY_CLIENT_ID: str = _require("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET: str = _require("SPOTIFY_CLIENT_SECRET")
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+DATABASE_URL: str = _require("DATABASE_URL")

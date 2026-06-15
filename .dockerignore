@@ -1,0 +1,35 @@
+# Python virtual environment — dependencies are installed fresh inside the container.
+.venv/
+venv/
+env/
+
+# Secret files — never bake these into the image.
+.env
+.env.*
+!.env.example
+
+# Python bytecode — regenerated automatically inside the container.
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Local SQLite database files — production uses Cloud SQL.
+*.db
+*.sqlite
+*.sqlite3
+
+# Git history — not needed at runtime.
+.git/
+.gitignore
+
+# IDE config.
+.vscode/
+.idea/
+
+# Log files.
+*.log
+logs/
+
+# macOS metadata.
+.DS_Store

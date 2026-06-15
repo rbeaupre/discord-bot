@@ -1,0 +1,52 @@
+# docker-compose.yml — LOCAL DEVELOPMENT ONLY
+#
+# This file is not used in production. On the GCP VM the bot runs as a plain
+# Docker container pointed at Cloud SQL.
+#
+# Usage:
+#   docker compose up --build        # start postgres + bot
+#   docker compose up --build -d     # same, in the background
+#   docker compose down              # stop and remove containers
+#   docker compose down -v           # also delete the postgres volume (wipes local DB)
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # Runs a local Postgres instance so you can develop against a real SQL
+  # database instead of SQLite, making the local environment match production.
+  postgres:
+    image: postgres:16-alpine       # alpine variant is smaller (~80 MB)
+    environment:
+      POSTGRES_USER: discord_bot
+      POSTGRES_PASSWORD: localpassword
+      POSTGRES_DB: discord_bot
+    ports:
+      - "5432:5432"                 # expose to host so you can inspect the DB with psql or a GUI
+    volumes:
+      # Named volume persists data across container restarts.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # The bot service waits for this check to pass before starting.
+      test: ["CMD-SHELL", "pg_isready -U discord_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Bot ─────────────────────────────────────────────────────────────────────
+  bot:
+    build: .                        # build from the Dockerfile in this directory
+    depends_on:
+      postgres:
+        condition: service_healthy  # don't start until Postgres is accepting connections
+    env_file:
+      - .env                        # loads DISCORD_TOKEN, ANTHROPIC_API_KEY, SPOTIFY_*, etc.
+    environment:
+      # Override the DATABASE_URL from .env so the bot connects to the local
+      # Postgres container instead of the SQLite file you use for quick scripts.
+      # 'postgres' here is the service name above, which Docker resolves to the
+      # container's internal IP automatically.
+      DATABASE_URL: postgresql://discord_bot:localpassword@postgres:5432/discord_bot
+
+# Named volume definition — Docker manages the actual storage location.
+volumes:
+  postgres_data:
