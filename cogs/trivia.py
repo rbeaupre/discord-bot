@@ -416,9 +416,7 @@ class TriviaCog(commands.Cog, name="Trivia"):
 async def setup(bot: commands.Bot) -> None:
     """
     Called automatically by bot.load_extension('cogs.trivia').
-    Registers the TriviaCog and its slash command group with the bot.
+    add_cog() automatically registers app_commands.Group class attributes on the
+    command tree, so no manual bot.tree.add_command() call is needed.
     """
-    cog = TriviaCog(bot)
-    # Manually add the slash command group since it's defined as a class attribute.
-    bot.tree.add_command(cog.trivia_group)
-    await bot.add_cog(cog)
+    await bot.add_cog(TriviaCog(bot))

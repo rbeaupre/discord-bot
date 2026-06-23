@@ -471,6 +471,4 @@ class BirthdayCog(commands.Cog, name="Birthdays"):
 
 async def setup(bot: commands.Bot) -> None:
     """Called by bot.load_extension('cogs.birthdays')."""
-    cog = BirthdayCog(bot)
-    bot.tree.add_command(cog.birthday_group)
-    await bot.add_cog(cog)
+    await bot.add_cog(BirthdayCog(bot))

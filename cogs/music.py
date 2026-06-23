@@ -449,6 +449,4 @@ class MusicCog(commands.Cog, name="Music"):
 
 async def setup(bot: commands.Bot) -> None:
     """Called by bot.load_extension('cogs.music')."""
-    cog = MusicCog(bot)
-    bot.tree.add_command(cog.music_group)
-    await bot.add_cog(cog)
+    await bot.add_cog(MusicCog(bot))
