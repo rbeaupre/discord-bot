@@ -380,19 +380,6 @@ class TriviaCog(commands.Cog, name="Trivia"):
             f"Trivia will now draw from: **{', '.join(selected)}**.", ephemeral=True
         )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Error handler
-    # ──────────────────────────────────────────────────────────────────────────
-
-    @trivia_group.error
-    async def trivia_error(
-        self, interaction: discord.Interaction, error: app_commands.AppCommandError
-    ) -> None:
-        """Catch admin-permission failures and explain them instead of silently ignoring."""
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "You need Administrator permissions to use that command.", ephemeral=True
-            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers

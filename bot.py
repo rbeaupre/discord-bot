@@ -23,6 +23,7 @@ import logging
 
 import discord
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -91,6 +92,32 @@ class DiscordBot(commands.Bot):
                 logger.error("Failed to load cog %s: %s", cog_path, exc, exc_info=True)
 
         # Sync the slash command tree with Discord.
+        # Global error handler for all slash commands. Catches errors that bubble
+        # up from any command, including missing-permissions failures on admin
+        # commands. The per-group @group.error decorator doesn't work on class
+        # methods (discord.py rejects the extra 'self' parameter), so we handle
+        # it globally here instead.
+        @self.tree.error
+        async def on_app_command_error(
+            interaction: discord.Interaction, error: app_commands.AppCommandError
+        ) -> None:
+            """Inform the user when they lack permissions for an admin command."""
+            if isinstance(error, app_commands.MissingPermissions):
+                msg = "You need Administrator permissions to use that command."
+                # Use followup if the interaction was already deferred, otherwise respond directly.
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                # Log unexpected errors so they're visible in the container logs.
+                logger.error(
+                    "Unhandled app command error in /%s: %s",
+                    interaction.command.name if interaction.command else "unknown",
+                    error,
+                    exc_info=True,
+                )
+
         if config.DEV_GUILD_ID:
             # Guild sync is instant and great for testing during development.
             # It only registers commands in the specified server, not globally.

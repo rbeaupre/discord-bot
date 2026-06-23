@@ -440,19 +440,6 @@ class BirthdayCog(commands.Cog, name="Birthdays"):
             f"Birthday checks will now run at **{time}** ({tz}) daily.", ephemeral=True
         )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Error handler
-    # ──────────────────────────────────────────────────────────────────────────
-
-    @birthday_group.error
-    async def birthday_error(
-        self, interaction: discord.Interaction, error: app_commands.AppCommandError
-    ) -> None:
-        """Catch and surface missing-permissions errors."""
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "You need Administrator permissions to use that command.", ephemeral=True
-            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers

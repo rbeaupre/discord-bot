@@ -418,19 +418,6 @@ class MusicCog(commands.Cog, name="Music"):
             f"Weekly release genres updated: **{', '.join(selected)}**.", ephemeral=True
         )
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Error handler
-    # ──────────────────────────────────────────────────────────────────────────
-
-    @music_group.error
-    async def music_error(
-        self, interaction: discord.Interaction, error: app_commands.AppCommandError
-    ) -> None:
-        """Surface missing-permissions errors to the user."""
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message(
-                "You need Administrator permissions to use that command.", ephemeral=True
-            )
 
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers
