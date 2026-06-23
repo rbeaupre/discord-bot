@@ -64,7 +64,19 @@ def generate_trivia_question(sports: list[str]) -> dict:
     """
     sports_str = ", ".join(sports)
 
-    prompt = f"""You are a sports trivia expert. Generate one multiple-choice trivia question about one of these sports: {sports_str}.
+    prompt = f"""You are a sports trivia expert writing questions for a group of dedicated, knowledgeable fans.
+
+Generate one hard multiple-choice trivia question about one of these sports: {sports_str}.
+
+The audience follows these sports closely, so avoid anything a casual fan would know. Good question topics include:
+- Specific records, statistics, or milestones (e.g. exact numbers, career totals, single-season marks)
+- Obscure historical facts (e.g. rule changes, founding moments, defunct teams)
+- Draft history, trades, and roster moves that serious followers would recall
+- Awards and honours beyond the most famous ones
+- Coaches, referees, or front-office figures rather than just star players
+- Unusual or lesser-known moments in playoff/championship history
+
+Avoid: championship winners of recent major tournaments, MVP winners of the last decade, currently active superstars' well-known achievements, or any question a casual viewer could guess.
 
 Return ONLY a valid JSON object — no markdown fences, no explanation text — with this exact structure:
 {{
@@ -83,7 +95,7 @@ Return ONLY a valid JSON object — no markdown fences, no explanation text — 
 Rules:
 - Exactly one option must be correct.
 - Use real, verifiable facts only — no invented statistics.
-- Vary difficulty across different calls (easy / medium / hard).
+- Make the wrong answer options plausible enough that even knowledgeable fans might second-guess themselves.
 - The "sport" field must be one of: {sports_str}."""
 
     response = _client.messages.create(

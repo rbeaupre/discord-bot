@@ -46,3 +46,6 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Markdown files for local development
+CLAUDE.md

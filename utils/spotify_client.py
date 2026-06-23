@@ -13,7 +13,6 @@ get_new_releases(genres)  → list[dict]
 """
 
 import logging
-from datetime import datetime
 
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -63,23 +62,39 @@ def get_new_release_by_genre(genre: str) -> dict | None:
 
     Returns None if Spotify returns no results or raises an error.
     """
-    current_year = datetime.now().year
-
+    # Strategy 1: genre filter + tag:new (Spotify's built-in new-releases flag).
+    # This is more reliable than year: filtering, which Spotify's search index
+    # handles inconsistently and often returns zero results.
     try:
-        # Search for albums (includes singles and EPs) matching genre + year.
         results = _sp.search(
-            q=f'genre:"{genre}" year:{current_year}',
+            q=f'genre:"{genre}" tag:new',
             type="album",
-            limit=10,   # fetch a few so we have candidates in case the first is unsuitable
+            limit=10,
         )
+        albums = results.get("albums", {}).get("items", [])
     except spotipy.SpotifyException as exc:
         logger.error("Spotify search failed for genre '%s': %s", genre, exc)
         return None
 
-    albums = results.get("albums", {}).get("items", [])
+    # Strategy 2: if tag:new returns nothing, fall back to genre filter alone.
+    # This broadens the search to all time but still targets the right genre.
+    if not albums:
+        logger.warning(
+            "No results for genre '%s' with tag:new — retrying without tag filter", genre
+        )
+        try:
+            results = _sp.search(
+                q=f'genre:"{genre}"',
+                type="album",
+                limit=10,
+            )
+            albums = results.get("albums", {}).get("items", [])
+        except spotipy.SpotifyException as exc:
+            logger.error("Spotify fallback search failed for genre '%s': %s", genre, exc)
+            return None
 
     if not albums:
-        logger.warning("No Spotify results for genre '%s' in %d", genre, current_year)
+        logger.warning("No Spotify results for genre '%s' with any search strategy", genre)
         return None
 
     # Take the first result — Spotify ranks by relevance, and with year filtering
