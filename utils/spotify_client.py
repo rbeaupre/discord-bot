@@ -166,23 +166,39 @@ def get_new_releases(
             )
             break
 
-        # Pass 2: relax the repeat filter — allow previously posted artists
-        # if nothing fresh and low-popularity is available.
+        # Pass 2: relax the popularity cap but keep the exclusion filter.
+        # This is the more important fallback — a fresh (not yet posted) artist
+        # is more valuable than a lower popularity score. When all 10 returned
+        # tracks exceed max_popularity, this pass finds a new artist instead of
+        # falling all the way through to pass 3 and repeating the same track.
         if not matched:
-            logger.warning("No fresh low-popularity match for '%s' — relaxing repeat filter", genre)
+            logger.warning(
+                "No low-popularity fresh match for '%s' — relaxing popularity cap", genre
+            )
             for track in tracks:
                 album_id = track.get("album", {}).get("id")
                 if album_id in used_album_ids:
                     continue
-                if track.get("popularity", 100) > max_popularity:
+                artist_id = track["artists"][0]["id"] if track.get("artists") else None
+                if artist_id in exclude_artist_ids:
                     continue
                 matched = track
+                logger.debug(
+                    "Genre '%s' pass-2 match: %s by %s (popularity %d — above cap)",
+                    genre,
+                    track.get("album", {}).get("name"),
+                    track["artists"][0]["name"] if track.get("artists") else "?",
+                    track.get("popularity", 0),
+                )
                 break
 
-        # Pass 3: last resort — just take the first unused track regardless of
-        # popularity or repeat history so we always have something to post.
+        # Pass 3: absolute last resort — all non-excluded artists have been
+        # exhausted. Take the first unused track regardless of repeat history.
         if not matched:
-            logger.warning("No filtered match for '%s' — using first available track", genre)
+            logger.warning(
+                "No unposted match for '%s' — all available artists already posted, "
+                "using first available track", genre
+            )
             for track in tracks:
                 album_id = track.get("album", {}).get("id")
                 if album_id not in used_album_ids:
