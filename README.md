@@ -1,6 +1,6 @@
 # Discord Bot
 
-A Discord bot for a private server with three features: sports trivia, weekly new music releases, and birthday announcements. All schedules and channels are configurable per-server by admins via slash commands.
+A Discord bot for a private server with four features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, and birthday announcements. All schedules and channels are configurable per-server by admins via slash commands.
 
 ---
 
@@ -10,6 +10,7 @@ A Discord bot for a private server with three features: sports trivia, weekly ne
 |---|---|---|---|
 | Sports trivia | Every day at 4:00 PM ET | `#sports-chat` | `/trivia play` |
 | New music releases | Every Monday at 10:00 AM ET | `#new_releases` | `/music releases` |
+| Pitchfork album review | 1st of every month at 10:00 AM ET | `#album-reviews` | `/album post` |
 | Birthday announcements | Every day at 9:00 AM ET | `#general` | — |
 
 ---
@@ -18,8 +19,8 @@ A Discord bot for a private server with three features: sports trivia, weekly ne
 
 ### Boot sequence
 
-1. `init_db()` creates the `birthdays` and `schedule_configs` tables if they don't exist
-2. The bot connects to Discord and loads the three feature cogs (trivia, music, birthdays)
+1. `init_db()` creates any missing database tables on startup
+2. The bot connects to Discord and loads the four feature cogs (trivia, music, birthdays, album reviews)
 3. APScheduler starts inside the same asyncio event loop as the bot
 4. `on_ready` fires in each cog — each one reads its config from the database and registers a scheduled job. If a guild has no config yet, default values are written automatically.
 
@@ -29,13 +30,19 @@ Two tables power the whole bot:
 
 **`birthdays`** — one row per registered user per server. Stores Discord IDs, the birth month and day (as separate columns for efficient daily queries), and a snapshot of the member's display name.
 
-**`schedule_configs`** — one row per feature per server. Stores the target channel ID, posting time (hour/minute/timezone), day of week for weekly features, and a JSON blob of content options (which sports or which genres to include). When an admin runs a config command, this row is updated and the APScheduler job is rescheduled immediately — no bot restart needed.
+**`schedule_configs`** — one row per feature per server. Stores the target channel ID, posting time (hour/minute/timezone), day of week for weekly features, and a JSON blob of content options (which sports or which genres to include; day of month for the album review). When an admin runs a config command, this row is updated and the APScheduler job is rescheduled immediately — no bot restart needed.
+
+**`music_posts`** — one row per Spotify release posted per server. The bot queries this table before each weekly post to exclude artists that have appeared in the last 90 days, preventing the same acts from cycling back too quickly.
+
+**`album_review_posts`** — one row per Pitchfork review posted per server. The Pitchfork URL is used as the deduplication key so the same album is never posted twice even if the monthly job fires more than once before Pitchfork publishes a new Best New Album.
 
 ### Content generation
 
 **Trivia** — Claude (Haiku model) is prompted to return a JSON object containing the question, four answer options, the correct letter, and an explanation. The answer is posted inside a Discord spoiler tag (`||text||`) so members have to click to reveal it.
 
 **Music** — The Spotify API is queried with `genre:"rock" year:2026` style searches (one per genre) to find recent releases. Claude then writes a short hype blurb for each result. Everything is posted as a single embed with one field per genre.
+
+**Album review** — The bot scrapes Pitchfork's Best New Albums page using `requests` + `BeautifulSoup`. It tries to read structured data from Next.js's `__NEXT_DATA__` JSON blob first (more reliable than HTML class names that change with redesigns), then falls back to HTML selectors. Claude summarizes the review text into 3–4 sentences, and Spotify is searched to attach a "Listen" link. If the scraper fails, a plain-text alert is posted in the channel so the admin knows to investigate.
 
 **Birthdays** — Purely database-driven. The daily job runs `WHERE birth_month = today AND birth_day = today` for the guild and posts an announcement embed for each match. Current server members get `@mentioned`; members who have left are referred to by their stored display name.
 
@@ -59,6 +66,10 @@ All `/config` subcommands require Administrator permissions. Changes are live im
 | `/birthday list` | See all registered birthdays in this server |
 | `/birthday config channel #ch` | Set the announcement channel |
 | `/birthday config time 09:00` | Set the daily check time (24h ET) |
+| `/album post` | Post the latest Pitchfork Best New Album right now |
+| `/album config channel #ch` | Set the album review channel |
+| `/album config day 1` | Set which day of the month to post (1–31) |
+| `/album config time 10:00` | Set the post time (24h ET) |
 
 ---
 
@@ -72,12 +83,14 @@ discord_bot/
 │   ├── models.py           SQLAlchemy ORM models (Birthday, ScheduleConfig)
 │   └── db.py               Engine + session factory, init_db()
 ├── utils/
-│   ├── claude_client.py    Anthropic API wrapper (trivia + release blurbs)
-│   └── spotify_client.py   Spotify API wrapper (new release search)
+│   ├── claude_client.py    Anthropic API wrapper (trivia, release blurbs, review summaries)
+│   ├── spotify_client.py   Spotify API wrapper (new release search + album lookup)
+│   └── pitchfork_client.py Pitchfork scraper (Best New Albums page)
 ├── cogs/
 │   ├── trivia.py           Sports trivia cog
 │   ├── music.py            Music releases cog
-│   └── birthdays.py        Birthday cog
+│   ├── birthdays.py        Birthday cog
+│   └── album_reviews.py    Monthly Pitchfork album review cog
 ├── Dockerfile              Production container image
 ├── docker-compose.yml      Local dev — runs Postgres + bot together
 └── .env.example            Template for all required secrets
@@ -295,7 +308,7 @@ docker logs -f discord-bot
    ```bash
    docker logs -f discord-bot
    ```
-   Look for all three cogs loading and "Bot ready" at the end.
+   Look for all four cogs loading and "Bot ready" at the end.
 
 ---
 
@@ -360,3 +373,4 @@ docker run -d --restart=always --env-file .env --name discord-bot discord-bot
 - [ ] `/trivia play` returns an embed
 - [ ] `/music releases` returns an embed
 - [ ] `/birthday set 1 1` confirms registration
+- [ ] `/album post` returns an embed with album, score, summary, and links

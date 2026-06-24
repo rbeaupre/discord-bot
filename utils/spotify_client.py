@@ -32,6 +32,7 @@ No secondary API calls are needed, so we stay within the restricted tier.
 Public functions
 ----------------
 get_new_releases(genres, exclude_artist_ids, max_popularity)  → list[dict]
+find_album_url(artist, album)                                  → str | None
 """
 
 import logging
@@ -212,3 +213,45 @@ def get_new_releases(
             releases.append(_track_to_release_dict(matched, genre))
 
     return releases
+
+
+def find_album_url(artist: str, album: str) -> str | None:
+    """
+    Search Spotify for an album by artist and title and return its URL.
+
+    Used by the monthly album review feature to add a "Listen on Spotify"
+    link to the Pitchfork Best New Album embed.
+
+    We use `artist:` and `album:` field filters in the query so Spotify
+    matches on metadata rather than full-text search — this produces much
+    more accurate results for exact album lookups.
+
+    Parameters
+    ----------
+    artist : str   Artist name as it appears on Pitchfork.
+    album  : str   Album title as it appears on Pitchfork.
+
+    Returns
+    -------
+    str or None
+        The Spotify album page URL, or None if no match is found or the
+        search fails (e.g. 403 on restricted app tier).
+    """
+    try:
+        result = _sp.search(
+            q=f"artist:{artist} album:{album}",
+            type="album",
+            limit=1,
+        )
+        items = result.get("albums", {}).get("items", [])
+        if items:
+            url = items[0].get("external_urls", {}).get("spotify")
+            if url:
+                logger.debug("Spotify album match for '%s — %s': %s", artist, album, url)
+            return url
+    except spotipy.SpotifyException as exc:
+        logger.error(
+            "Spotify album search failed for '%s — %s': %s", artist, album, exc
+        )
+
+    return None

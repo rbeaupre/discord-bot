@@ -5,11 +5,14 @@ SQLAlchemy ORM models. Each class maps to one database table.
 
 Tables
 ------
-birthdays        — One row per registered user birthday per guild.
-schedule_configs — One row per (guild, feature) pair storing the channel,
-                   posting schedule, and content options for each bot feature.
-music_posts      — One row per release posted by the music feature. Used to
-                   prevent the same artist from being posted repeatedly.
+birthdays          — One row per registered user birthday per guild.
+schedule_configs   — One row per (guild, feature) pair storing the channel,
+                     posting schedule, and content options for each bot feature.
+music_posts        — One row per release posted by the music feature. Used to
+                     prevent the same artist from being posted repeatedly.
+album_review_posts — One row per album review posted by the album review
+                     feature. Used to prevent the same album from being
+                     re-posted if the monthly job fires more than once.
 """
 
 import json
@@ -178,4 +181,38 @@ class MusicPost(Base):
         return (
             f"<MusicPost guild={self.guild_id} artist={self.artist_name!r} "
             f"release={self.release_title!r} posted={self.posted_at}>"
+        )
+
+
+class AlbumReviewPost(Base):
+    """
+    Records every album review the album review feature has posted in a guild.
+
+    The Pitchfork URL is used as the deduplication key — if the monthly job
+    fires again before Pitchfork has published a new Best New Album, the cog
+    will see the URL already in this table and skip the post.
+    """
+
+    __tablename__ = "album_review_posts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this review was posted in.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # Full Pitchfork review URL — used as the deduplication key so the same
+    # album isn't posted twice in the same guild.
+    pitchfork_url = Column(String(500), nullable=False)
+
+    # Human-readable fields stored for reference and future admin commands.
+    artist_name = Column(String(200), nullable=False)
+    album_title = Column(String(200), nullable=False)
+
+    # When this review was posted (UTC).
+    posted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AlbumReviewPost guild={self.guild_id} artist={self.artist_name!r} "
+            f"album={self.album_title!r} posted={self.posted_at}>"
         )

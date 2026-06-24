@@ -14,6 +14,10 @@ generate_trivia_question(sports)  → dict
 describe_release(artist, title, genre)  → str
     Write a short hype blurb for a Spotify release to include in the
     weekly music post.
+
+summarize_pitchfork_review(artist, album, score, review_text)  → str
+    Summarize a Pitchfork album review into 3–4 sentences for the
+    monthly album review embed.
 """
 
 import json
@@ -155,6 +159,53 @@ Keep it casual, enthusiastic, and informative. No hashtags. Return only the blur
     response = _client.messages.create(
         model=_MODEL,
         max_tokens=150,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return response.content[0].text.strip()
+
+
+def summarize_pitchfork_review(
+    artist: str, album: str, score: float, review_text: str
+) -> str:
+    """
+    Ask Claude to write a concise summary of a Pitchfork album review.
+
+    The summary is written in Claude's own voice, drawing on the critic's
+    actual review text but condensed to fit comfortably in a Discord embed.
+    This is used in the monthly Best New Album post.
+
+    Parameters
+    ----------
+    artist      : Artist name as scraped from Pitchfork.
+    album       : Album title as scraped from Pitchfork.
+    score       : Pitchfork's numeric score, e.g. 8.5.
+    review_text : Excerpted body text from the Pitchfork review (may be
+                  truncated at _REVIEW_TEXT_MAX_CHARS by the scraper).
+
+    Returns
+    -------
+    str
+        A 3–4 sentence summary, casual in tone and ready to embed in Discord.
+    """
+    prompt = f"""You are writing a short summary for a Discord music bot's monthly album review post.
+
+Below is an excerpt from a Pitchfork review. Summarize it in 3–4 sentences in your own words,
+capturing the reviewer's overall take, what makes the album distinctive, and its mood or sound.
+Keep it engaging and conversational — this is for a group of music-loving friends.
+
+Album: {album}
+Artist: {artist}
+Pitchfork Score: {score}/10
+
+Review excerpt:
+{review_text}
+
+Return only the summary text — no labels, no preamble, no quotation marks."""
+
+    response = _client.messages.create(
+        model=_MODEL,
+        max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
     )
 
