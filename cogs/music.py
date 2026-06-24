@@ -259,7 +259,7 @@ class MusicCog(commands.Cog, name="Music"):
         name="channel",
         description="Set the channel for weekly new-release posts (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def music_config_channel(
         self,
         interaction: discord.Interaction,
@@ -289,7 +289,7 @@ class MusicCog(commands.Cog, name="Music"):
         name="day",
         description="Set which weekday new releases are posted (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(weekday="Weekday abbreviation: mon, tue, wed, thu, fri, sat, sun")
     async def music_config_day(
         self, interaction: discord.Interaction, weekday: str
@@ -328,7 +328,7 @@ class MusicCog(commands.Cog, name="Music"):
         name="time",
         description="Set the posting time in 24h ET, e.g. 10:00 (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def music_config_time(
         self, interaction: discord.Interaction, time: str
     ) -> None:
@@ -369,7 +369,7 @@ class MusicCog(commands.Cog, name="Music"):
         name="genres",
         description="Choose which genres appear in the weekly post (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(
         rock="Include rock releases",
         indie="Include indie releases",

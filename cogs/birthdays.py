@@ -373,7 +373,7 @@ class BirthdayCog(commands.Cog, name="Birthdays"):
         name="channel",
         description="Set the channel for birthday announcements (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def birthday_config_channel(
         self,
         interaction: discord.Interaction,
@@ -403,7 +403,7 @@ class BirthdayCog(commands.Cog, name="Birthdays"):
         name="time",
         description="Set the daily birthday check time in 24h ET, e.g. 09:00 (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def birthday_config_time(
         self, interaction: discord.Interaction, time: str
     ) -> None:

@@ -103,7 +103,7 @@ class DiscordBot(commands.Bot):
         ) -> None:
             """Inform the user when they lack permissions for an admin command."""
             if isinstance(error, app_commands.MissingPermissions):
-                msg = "You need Administrator permissions to use that command."
+                msg = "You need the Manage Server permission to use that command."
                 # Use followup if the interaction was already deferred, otherwise respond directly.
                 if interaction.response.is_done():
                     await interaction.followup.send(msg, ephemeral=True)

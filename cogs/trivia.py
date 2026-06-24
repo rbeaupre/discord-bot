@@ -248,7 +248,7 @@ class TriviaCog(commands.Cog, name="Trivia"):
         name="channel",
         description="Set the channel where daily trivia posts appear (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def trivia_config_channel(
         self,
         interaction: discord.Interaction,
@@ -279,7 +279,7 @@ class TriviaCog(commands.Cog, name="Trivia"):
         name="time",
         description="Set the daily trivia post time in 24h ET, e.g. 16:00 (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def trivia_config_time(
         self, interaction: discord.Interaction, time: str
     ) -> None:
@@ -326,7 +326,7 @@ class TriviaCog(commands.Cog, name="Trivia"):
         name="sports",
         description="Choose which sports appear in trivia questions (admin only)",
     )
-    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(
         soccer="Include soccer questions",
         baseball="Include baseball questions",
