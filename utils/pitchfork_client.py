@@ -32,7 +32,7 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://pitchfork.com"
-_BEST_NEW_ALBUMS_URL = "https://pitchfork.com/best/albums/"
+_BEST_NEW_ALBUMS_URL = "https://pitchfork.com/reviews/best/albums/"
 
 # Seconds to wait for a response before giving up.
 _REQUEST_TIMEOUT = 15
