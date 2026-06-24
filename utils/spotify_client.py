@@ -114,7 +114,7 @@ def get_new_releases(genres: list[str]) -> list[dict]:
     # album ID so we don't show the same release twice.
     current_year = datetime.now().year
     try:
-        result = _sp.search(q=f"year:{current_year}", type="track", limit=20)
+        result = _sp.search(q=f"year:{current_year}", type="track", limit=10)
         tracks = result["tracks"]["items"]
     except spotipy.SpotifyException as exc:
         logger.error("Failed to fetch new releases from Spotify: %s", exc)
