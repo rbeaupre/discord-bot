@@ -8,16 +8,16 @@ required — which is appropriate for reading public catalog data like albums.
 
 Strategy
 --------
-Spotify has deprecated two approaches we tried previously:
-  - The genre: search filter returns no results for most queries.
-  - The /v1/browse/new-releases endpoint returns 403 for newer app registrations.
+Several Spotify approaches are broken for new app registrations:
+  - genre: search filter — returns no results.
+  - /v1/browse/new-releases endpoint — returns 403 Forbidden.
+  - tag:new search filter — returns 400 Invalid limit.
 
 Current working approach:
 
-  1. sp.search(q='tag:new', type='album', limit=50)
-       The tag:new search filter is Spotify's own flag for newly released albums.
-       Searching by it via the standard search API avoids the deprecated browse
-       endpoint and reliably returns a fresh batch of recent releases.
+  1. sp.search(q='year:YYYY', type='album', limit=20)
+       Searching by the current calendar year reliably returns albums released
+       this year without requiring extended API access.
 
   2. sp.artists([id, id, ...])
        Batch-fetches genre tags for up to 50 artists in a single API call.
@@ -34,6 +34,7 @@ get_new_releases(genres)  → list[dict]
 """
 
 import logging
+from datetime import datetime
 
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -105,19 +106,21 @@ def get_new_releases(genres: list[str]) -> list[dict]:
         May be shorter than the input list only if Spotify returns no albums
         at all (very unlikely).
     """
-    # ── Step 1: fetch new releases via tag:new search ────────────────────────
-    # The browse/new-releases endpoint is deprecated (returns 403). The tag:new
-    # search filter is the supported replacement — it flags recently released
-    # albums the same way Spotify's own "New Releases" section does.
+    # ── Step 1: fetch recent albums via year search ───────────────────────────
+    # Both the browse/new-releases endpoint (403) and tag:new search filter
+    # (400) are broken for new Spotify app registrations. Searching by the
+    # current year is the most reliable remaining approach — it returns albums
+    # released this calendar year without requiring any special API access.
+    current_year = datetime.now().year
     try:
-        result = _sp.search(q="tag:new", type="album", limit=20)
+        result = _sp.search(q=f"year:{current_year}", type="album", limit=20)
         albums = result["albums"]["items"]
     except spotipy.SpotifyException as exc:
         logger.error("Failed to fetch new releases from Spotify: %s", exc)
         return []
 
     if not albums:
-        logger.warning("Spotify tag:new search returned no albums")
+        logger.warning("Spotify year:%d search returned no albums", current_year)
         return []
 
     logger.info("Fetched %d new releases from Spotify", len(albums))
