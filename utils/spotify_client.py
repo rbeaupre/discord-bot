@@ -6,10 +6,27 @@ Wrapper around the Spotipy library for fetching new music releases.
 Uses Spotify's Client Credentials flow — no user login or OAuth callback
 required — which is appropriate for reading public catalog data like albums.
 
+Strategy
+--------
+Spotify's genre: search filter is unreliable and effectively deprecated.
+Instead we use two official endpoints:
+
+  1. sp.new_releases(limit=50)
+       Spotify's curated "new releases" browse endpoint. Returns the most
+       recently released albums globally. Reliable and always returns results.
+
+  2. sp.artists([id, id, ...])
+       Batch-fetches genre tags for up to 50 artists in a single API call.
+       We use this to match each new release to one of our target genres.
+
+For each target genre we pick the first album whose primary artist has a
+matching Spotify genre tag. If no genre match is found we fall back to the
+next unused album so the post always has content.
+
 Public functions
 ----------------
 get_new_releases(genres)  → list[dict]
-    Fetch one recent release per genre from Spotify.
+    Fetch one recent release per genre from Spotify's new releases feed.
 """
 
 import logging
@@ -31,83 +48,24 @@ _sp = spotipy.Spotify(
 )
 
 
-def get_new_release_by_genre(genre: str) -> dict | None:
+def _album_to_release_dict(album: dict, genre: str) -> dict:
     """
-    Search Spotify for the most recently released album or single in a genre.
-
-    Strategy: Use Spotify's search API with a 'genre:"<name>"' filter token
-    combined with 'year:<current_year>' to surface fresh releases. Results are
-    ordered by Spotify's relevance score, so we take the first result — it is
-    almost always a very recent release.
-
-    Note: Spotify's genre taxonomy for search differs from audio feature genres.
-    Common values that work well: "rock", "indie", "electronic", "pop", "metal".
-    If a genre string returns no results, the caller receives None and the
-    weekly post skips that genre gracefully.
+    Convert a raw Spotify album object into our standard release dict.
 
     Parameters
     ----------
-    genre : str
-        Genre label to search for (e.g. "rock", "indie rock", "electronic").
+    album : dict   Raw album object from the Spotify API.
+    genre : str    The genre label we're associating this release with.
 
     Returns
     -------
-    dict with keys:
-        artist       – primary artist name
-        title        – album or single title
-        release_date – release date string from Spotify (e.g. "2026-06-10")
-        spotify_url  – link to the release on Spotify
-        image_url    – URL of the album cover art (largest available)
-        genre        – the genre string passed in (echoed back for labelling)
-
-    Returns None if Spotify returns no results or raises an error.
+    dict with keys: artist, title, release_date, spotify_url, image_url, genre
     """
-    # Strategy 1: genre filter + tag:new (Spotify's built-in new-releases flag).
-    # This is more reliable than year: filtering, which Spotify's search index
-    # handles inconsistently and often returns zero results.
-    try:
-        results = _sp.search(
-            q=f'genre:"{genre}" tag:new',
-            type="album",
-            limit=10,
-        )
-        albums = results.get("albums", {}).get("items", [])
-    except spotipy.SpotifyException as exc:
-        logger.error("Spotify search failed for genre '%s': %s", genre, exc)
-        return None
-
-    # Strategy 2: if tag:new returns nothing, fall back to genre filter alone.
-    # This broadens the search to all time but still targets the right genre.
-    if not albums:
-        logger.warning(
-            "No results for genre '%s' with tag:new — retrying without tag filter", genre
-        )
-        try:
-            results = _sp.search(
-                q=f'genre:"{genre}"',
-                type="album",
-                limit=10,
-            )
-            albums = results.get("albums", {}).get("items", [])
-        except spotipy.SpotifyException as exc:
-            logger.error("Spotify fallback search failed for genre '%s': %s", genre, exc)
-            return None
-
-    if not albums:
-        logger.warning("No Spotify results for genre '%s' with any search strategy", genre)
-        return None
-
-    # Take the first result — Spotify ranks by relevance, and with year filtering
-    # this is reliably a recent release in the correct genre.
-    album = albums[0]
-
-    # The artists list can contain multiple names (for compilations, features, etc.).
-    # We display just the primary (first) artist.
+    # Use the primary (first) artist name; compilations may have several.
     artist_name = album["artists"][0]["name"] if album["artists"] else "Unknown Artist"
 
-    # Spotify returns images in descending size order — index 0 is the largest
-    # (usually 640x640), which looks best in a Discord embed.
-    image_url = album["images"][0]["url"] if album["images"] else None
+    # Spotify returns cover art in descending size order — index 0 is largest (640x640).
+    image_url = album["images"][0]["url"] if album.get("images") else None
 
     return {
         "artist": artist_name,
@@ -121,28 +79,101 @@ def get_new_release_by_genre(genre: str) -> dict | None:
 
 def get_new_releases(genres: list[str]) -> list[dict]:
     """
-    Fetch one new release per genre from the provided list.
+    Fetch one new release per genre from Spotify's official new-releases feed.
 
-    Calls get_new_release_by_genre() for each genre and collects the results.
-    Genres that return no results are silently skipped so the weekly post still
-    goes out even if one genre search fails.
+    Approach
+    --------
+    1. Call sp.new_releases() to get up to 50 recently released albums.
+    2. Batch-fetch genre tags for all their primary artists in one API call.
+    3. For each target genre, find the first album whose artist has a matching
+       genre tag. If no match is found, fall back to the next unused album so
+       the post always has content.
 
     Parameters
     ----------
     genres : list[str]
-        Genre strings to search for, e.g. ["rock", "indie rock", "electronic"].
+        Target genre labels, e.g. ["rock", "indie", "electronic"].
 
     Returns
     -------
     list[dict]
-        One release dict per successful genre lookup (see get_new_release_by_genre).
-        May be shorter than the input list if some genres return no results.
+        One release dict per genre (see _album_to_release_dict for keys).
+        May be shorter than the input list only if Spotify returns no albums
+        at all (very unlikely).
     """
+    # ── Step 1: fetch new releases ────────────────────────────────────────────
+    try:
+        result = _sp.new_releases(limit=50)
+        albums = result["albums"]["items"]
+    except spotipy.SpotifyException as exc:
+        logger.error("Failed to fetch new releases from Spotify: %s", exc)
+        return []
+
+    if not albums:
+        logger.warning("Spotify new_releases returned no albums")
+        return []
+
+    logger.info("Fetched %d new releases from Spotify", len(albums))
+
+    # ── Step 2: batch-fetch artist genre tags ─────────────────────────────────
+    # Extract the primary artist ID from each album (deduplicated).
+    artist_ids = list({
+        album["artists"][0]["id"]
+        for album in albums
+        if album.get("artists")
+    })
+
+    # sp.artists() accepts up to 50 IDs per call — we have at most 50 albums
+    # so one call is always sufficient.
+    artist_genre_map: dict[str, list[str]] = {}
+    try:
+        artists_result = _sp.artists(artist_ids[:50])
+        for artist in artists_result.get("artists", []):
+            if artist:
+                artist_genre_map[artist["id"]] = artist.get("genres", [])
+        logger.debug("Fetched genre tags for %d artists", len(artist_genre_map))
+    except spotipy.SpotifyException as exc:
+        # Non-fatal — we'll fall back to unfiltered selection below.
+        logger.warning(
+            "Could not fetch artist genres (%s) — genre matching disabled for this run", exc
+        )
+
+    # ── Step 3: match albums to target genres ─────────────────────────────────
     releases = []
+    used_album_ids: set[str] = set()
+
     for genre in genres:
-        release = get_new_release_by_genre(genre)
-        if release:
-            releases.append(release)
-        else:
-            logger.warning("Skipping genre '%s' — no release found", genre)
+        matched_album = None
+
+        # First pass: find an album whose artist has a matching genre tag.
+        # Spotify genre tags are multi-word strings like "alternative rock" or
+        # "indie pop", so we check if our keyword appears anywhere in any tag.
+        for album in albums:
+            if album["id"] in used_album_ids:
+                continue
+            artist_id = album["artists"][0]["id"] if album.get("artists") else None
+            artist_genres = artist_genre_map.get(artist_id, [])
+            if any(genre.lower() in ag.lower() for ag in artist_genres):
+                matched_album = album
+                logger.debug(
+                    "Genre match for '%s': %s by %s",
+                    genre, album["name"], album["artists"][0]["name"],
+                )
+                break
+
+        # Second pass: no genre match found — just take the next unused album.
+        # This ensures we always post something even if genre tags are sparse.
+        if not matched_album:
+            logger.warning(
+                "No genre match for '%s' — using next available new release", genre
+            )
+            for album in albums:
+                if album["id"] not in used_album_ids:
+                    matched_album = album
+                    break
+
+        if matched_album:
+            used_album_ids.add(matched_album["id"])
+            releases.append(_album_to_release_dict(matched_album, genre))
+
     return releases
