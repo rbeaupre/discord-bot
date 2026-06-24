@@ -15,9 +15,10 @@ Several Spotify approaches are broken for new app registrations:
 
 Current working approach:
 
-  1. sp.search(q='year:YYYY', type='album', limit=20)
-       Searching by the current calendar year reliably returns albums released
-       this year without requiring extended API access.
+  1. sp.search(q='year:YYYY', type='track', limit=20)
+       type='album' searches return 400 for newer app tiers. Searching for
+       tracks by year works fine; each track object contains a nested album
+       object with all the fields we need. Results are deduplicated by album ID.
 
   2. sp.artists([id, id, ...])
        Batch-fetches genre tags for up to 50 artists in a single API call.
@@ -106,24 +107,38 @@ def get_new_releases(genres: list[str]) -> list[dict]:
         May be shorter than the input list only if Spotify returns no albums
         at all (very unlikely).
     """
-    # ── Step 1: fetch recent albums via year search ───────────────────────────
-    # Both the browse/new-releases endpoint (403) and tag:new search filter
-    # (400) are broken for new Spotify app registrations. Searching by the
-    # current year is the most reliable remaining approach — it returns albums
-    # released this calendar year without requiring any special API access.
+    # ── Step 1: fetch recent tracks and extract their album info ─────────────
+    # Spotify restricts type="album" searches (400 Invalid limit) for newer
+    # app tiers. type="track" works fine and each track object contains a
+    # nested album object with all the fields we need. We deduplicate by
+    # album ID so we don't show the same release twice.
     current_year = datetime.now().year
     try:
-        result = _sp.search(q=f"year:{current_year}", type="album", limit=20)
-        albums = result["albums"]["items"]
+        result = _sp.search(q=f"year:{current_year}", type="track", limit=20)
+        tracks = result["tracks"]["items"]
     except spotipy.SpotifyException as exc:
         logger.error("Failed to fetch new releases from Spotify: %s", exc)
         return []
 
-    if not albums:
-        logger.warning("Spotify year:%d search returned no albums", current_year)
+    if not tracks:
+        logger.warning("Spotify year:%d track search returned no results", current_year)
         return []
 
-    logger.info("Fetched %d new releases from Spotify", len(albums))
+    # Deduplicate albums — multiple tracks may come from the same release.
+    seen_album_ids: set[str] = set()
+    albums = []
+    for track in tracks:
+        album = track.get("album", {})
+        album_id = album.get("id")
+        if album_id and album_id not in seen_album_ids:
+            # The album object from a track search may omit the artists field;
+            # copy it from the track so the rest of the code works as normal.
+            if not album.get("artists"):
+                album["artists"] = track.get("artists", [])
+            seen_album_ids.add(album_id)
+            albums.append(album)
+
+    logger.info("Fetched %d unique albums from %d tracks", len(albums), len(tracks))
 
     # ── Step 2: batch-fetch artist genre tags ─────────────────────────────────
     # Extract the primary artist ID from each album (deduplicated).
