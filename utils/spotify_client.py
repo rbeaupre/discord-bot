@@ -6,32 +6,32 @@ Wrapper around the Spotipy library for fetching new music releases.
 Uses Spotify's Client Credentials flow — no user login or OAuth callback
 required — which is appropriate for reading public catalog data like albums.
 
+Spotify API restrictions (as of 2026 for new app registrations)
+---------------------------------------------------------------
+The following endpoints return 403 Forbidden for apps without extended access:
+  - GET /v1/browse/new-releases
+  - GET /v1/artists (batch artist lookup — no genre tags or artist popularity)
+
+What DOES work:
+  - GET /v1/search with type=track, limit<=10
+
 Strategy
 --------
-Several Spotify approaches are broken for new app registrations:
-  - genre: search filter — returns no results.
-  - /v1/browse/new-releases endpoint — returns 403 Forbidden.
-  - tag:new search filter — returns 400 Invalid limit.
+For each target genre we run one track search using the genre name as a keyword
+combined with a year filter: e.g. `rock year:2026`. This is a keyword search
+(not the broken genre: field filter), so it matches tracks whose title, artist
+name, or album name contains the genre word — good enough for our purposes.
 
-Current working approach:
+Each track object from the search result contains:
+  - track.popularity     (0–100) — used to filter out mainstream artists
+  - track.artists[0].id          — used to exclude previously posted artists
+  - track.album                  — album name, cover art, Spotify URL, release date
 
-  1. sp.search(q='year:YYYY', type='track', limit=20)
-       type='album' searches return 400 for newer app tiers. Searching for
-       tracks by year works fine; each track object contains a nested album
-       object with all the fields we need. Results are deduplicated by album ID.
-
-  2. sp.artists([id, id, ...])
-       Batch-fetches genre tags for up to 50 artists in a single API call.
-       We use this to match each new release to one of our target genres.
-
-For each target genre we pick the first album whose primary artist has a
-matching Spotify genre tag. If no genre match is found we fall back to the
-next unused album so the post always has content.
+No secondary API calls are needed, so we stay within the restricted tier.
 
 Public functions
 ----------------
-get_new_releases(genres)  → list[dict]
-    Fetch one recent release per genre from Spotify's new releases feed.
+get_new_releases(genres, exclude_artist_ids, max_popularity)  → list[dict]
 """
 
 import logging
@@ -44,8 +44,6 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Authenticate using client credentials. Spotipy handles token caching and
-# refresh automatically, so we only need to create this object once.
 _sp = spotipy.Spotify(
     auth_manager=SpotifyClientCredentials(
         client_id=config.SPOTIFY_CLIENT_ID,
@@ -53,36 +51,44 @@ _sp = spotipy.Spotify(
     )
 )
 
+# Tracks with a Spotify popularity score above this threshold are considered
+# mainstream and skipped in the first pass. Scale is 0–100.
+# 60 cuts out well-known chart acts while keeping moderately known artists.
+_DEFAULT_MAX_POPULARITY = 60
 
-def _album_to_release_dict(album: dict, genre: str) -> dict:
+
+def _track_to_release_dict(track: dict, genre: str) -> dict:
     """
-    Convert a raw Spotify album object into our standard release dict.
+    Convert a Spotify track search result into our standard release dict.
+
+    We use the album name and URL as the release rather than the individual
+    track, since we're surfacing new albums/EPs to the server.
 
     Parameters
     ----------
-    album : dict   Raw album object from the Spotify API.
-    genre : str    The genre label we're associating this release with.
+    track : dict   Raw track object from the Spotify search API.
+    genre : str    The genre label this track was found under.
 
     Returns
     -------
-    dict with keys:
-        artist, artist_id, title, release_date, spotify_url, image_url, genre
+    dict with keys: artist, artist_id, title, release_date, spotify_url, image_url, genre
     """
-    primary_artist = album["artists"][0] if album.get("artists") else {}
-    artist_name = primary_artist.get("name", "Unknown Artist")
-    # artist_id is stored in the DB after posting so we can skip this artist
-    # in future weeks (repeat-prevention).
-    artist_id = primary_artist.get("id")
+    primary_artist = track["artists"][0] if track.get("artists") else {}
+    album = track.get("album", {})
 
-    # Spotify returns cover art in descending size order — index 0 is largest (640x640).
-    image_url = album["images"][0]["url"] if album.get("images") else None
+    # Link to the album page, not the individual track.
+    spotify_url = album.get("external_urls", {}).get("spotify", "")
+
+    # Spotify returns cover art in descending size order — index 0 is largest.
+    images = album.get("images", [])
+    image_url = images[0]["url"] if images else None
 
     return {
-        "artist": artist_name,
-        "artist_id": artist_id,
-        "title": album["name"],
+        "artist": primary_artist.get("name", "Unknown Artist"),
+        "artist_id": primary_artist.get("id"),   # stored in DB to prevent repeats
+        "title": album.get("name", track.get("name", "Unknown")),
         "release_date": album.get("release_date", "Unknown"),
-        "spotify_url": album["external_urls"].get("spotify", ""),
+        "spotify_url": spotify_url,
         "image_url": image_url,
         "genre": genre,
     }
@@ -91,156 +97,99 @@ def _album_to_release_dict(album: dict, genre: str) -> dict:
 def get_new_releases(
     genres: list[str],
     exclude_artist_ids: list[str] | None = None,
-    max_popularity: int = 60,
+    max_popularity: int = _DEFAULT_MAX_POPULARITY,
 ) -> list[dict]:
     """
-    Fetch one new release per genre, filtered for less well-known artists and
-    avoiding artists that have been posted recently.
-
-    Approach
-    --------
-    1. Search Spotify by current year to get a batch of recent albums.
-    2. Batch-fetch popularity scores and genre tags for all primary artists.
-    3. For each target genre, find the first album whose artist:
-         - Has a popularity score at or below max_popularity (avoids mainstream acts)
-         - Is not in the exclude_artist_ids list (avoids weekly repeats)
-         - Has a genre tag matching the target genre keyword
-       Falls back to the next unused album if no genre match is found, and
-       relaxes all filters as a last resort so the post always has content.
+    Fetch one new release per genre, filtering for less well-known artists and
+    skipping artists that have been posted in previous weeks.
 
     Parameters
     ----------
-    genres             : Target genre labels, e.g. ["rock", "indie", "electronic"].
-    exclude_artist_ids : Artist IDs to skip (previously posted artists).
-    max_popularity     : Maximum Spotify popularity score (0–100). Artists above
-                         this threshold are skipped. Default 60.
+    genres             : Genre labels to search for, e.g. ["rock", "indie", "electronic"].
+    exclude_artist_ids : Spotify artist IDs to skip (previously posted artists).
+    max_popularity     : Maximum track popularity score (0–100). Tracks above this
+                         are skipped in the first pass. Default 60.
 
     Returns
     -------
     list[dict]
-        One release dict per genre (see _album_to_release_dict for keys).
+        One release dict per genre. May be shorter than genres if a search fails.
     """
     if exclude_artist_ids is None:
         exclude_artist_ids = []
-    # ── Step 1: fetch recent tracks and extract their album info ─────────────
-    # Spotify restricts type="album" searches (400 Invalid limit) for newer
-    # app tiers. type="track" works fine and each track object contains a
-    # nested album object with all the fields we need. We deduplicate by
-    # album ID so we don't show the same release twice.
+
     current_year = datetime.now().year
-    try:
-        result = _sp.search(q=f"year:{current_year}", type="track", limit=10)
-        tracks = result["tracks"]["items"]
-    except spotipy.SpotifyException as exc:
-        logger.error("Failed to fetch new releases from Spotify: %s", exc)
-        return []
-
-    if not tracks:
-        logger.warning("Spotify year:%d track search returned no results", current_year)
-        return []
-
-    # Deduplicate albums — multiple tracks may come from the same release.
-    seen_album_ids: set[str] = set()
-    albums = []
-    for track in tracks:
-        album = track.get("album", {})
-        album_id = album.get("id")
-        if album_id and album_id not in seen_album_ids:
-            # The album object from a track search may omit the artists field;
-            # copy it from the track so the rest of the code works as normal.
-            if not album.get("artists"):
-                album["artists"] = track.get("artists", [])
-            seen_album_ids.add(album_id)
-            albums.append(album)
-
-    logger.info("Fetched %d unique albums from %d tracks", len(albums), len(tracks))
-
-    # ── Step 2: batch-fetch artist genre tags ─────────────────────────────────
-    # Extract the primary artist ID from each album (deduplicated).
-    artist_ids = list({
-        album["artists"][0]["id"]
-        for album in albums
-        if album.get("artists")
-    })
-
-    # sp.artists() accepts up to 50 IDs per call — we have at most 10 albums
-    # so one call is always sufficient. We store the full artist object so we
-    # can access both genres and popularity in the selection step below.
-    artist_genre_map: dict[str, dict] = {}  # artist_id → {genres, popularity, ...}
-    try:
-        artists_result = _sp.artists(artist_ids[:50])
-        for artist in artists_result.get("artists", []):
-            if artist:
-                artist_genre_map[artist["id"]] = {
-                    "genres": artist.get("genres", []),
-                    "popularity": artist.get("popularity", 0),
-                }
-        logger.debug("Fetched info for %d artists", len(artist_genre_map))
-    except spotipy.SpotifyException as exc:
-        # Non-fatal — selection will fall back to pass 3 (unfiltered) below.
-        logger.warning(
-            "Could not fetch artist info (%s) — filters disabled for this run", exc
-        )
-
-    # ── Step 3: match albums to target genres with popularity + repeat filters ──
-    releases = []
+    releases: list[dict] = []
     used_album_ids: set[str] = set()
 
     for genre in genres:
-        matched_album = None
+        # Search for tracks matching this genre keyword + current year.
+        # We use keyword search (not the broken genre: field filter) — this
+        # matches the genre word against track/artist/album metadata.
+        try:
+            result = _sp.search(
+                q=f"{genre} year:{current_year}",
+                type="track",
+                limit=10,
+            )
+            tracks = result["tracks"]["items"]
+        except spotipy.SpotifyException as exc:
+            logger.error("Spotify search failed for genre '%s': %s", genre, exc)
+            continue
 
-        # Pass 1: ideal match — correct genre, not too popular, not a recent repeat.
-        for album in albums:
-            if album["id"] in used_album_ids:
-                continue
-            artist_id = album["artists"][0]["id"] if album.get("artists") else None
-            artist_info = artist_genre_map.get(artist_id, {})
-            popularity = artist_info.get("popularity", 0)
-            artist_genres = artist_info.get("genres", [])
+        if not tracks:
+            logger.warning("No Spotify results for genre '%s'", genre)
+            continue
 
-            if popularity > max_popularity:
+        matched = None
+
+        # Pass 1: ideal match — not too popular, not a repeat, unused album.
+        for track in tracks:
+            album_id = track.get("album", {}).get("id")
+            if album_id in used_album_ids:
                 continue
+            artist_id = track["artists"][0]["id"] if track.get("artists") else None
             if artist_id in exclude_artist_ids:
                 continue
-            if any(genre.lower() in ag.lower() for ag in artist_genres):
-                matched_album = album
-                logger.debug(
-                    "Genre match for '%s': %s by %s (popularity %d)",
-                    genre, album["name"], album["artists"][0]["name"], popularity,
-                )
+            if track.get("popularity", 100) > max_popularity:
+                continue
+            matched = track
+            logger.debug(
+                "Genre '%s' match: %s by %s (popularity %d)",
+                genre,
+                track.get("album", {}).get("name"),
+                track["artists"][0]["name"] if track.get("artists") else "?",
+                track.get("popularity", 0),
+            )
+            break
+
+        # Pass 2: relax the repeat filter — allow previously posted artists
+        # if nothing fresh and low-popularity is available.
+        if not matched:
+            logger.warning("No fresh low-popularity match for '%s' — relaxing repeat filter", genre)
+            for track in tracks:
+                album_id = track.get("album", {}).get("id")
+                if album_id in used_album_ids:
+                    continue
+                if track.get("popularity", 100) > max_popularity:
+                    continue
+                matched = track
                 break
 
-        # Pass 2: relax the repeat filter — correct genre, not too popular,
-        # but allow a previously posted artist if nothing fresh is available.
-        if not matched_album:
-            logger.warning("No fresh match for '%s' — relaxing repeat filter", genre)
-            for album in albums:
-                if album["id"] in used_album_ids:
-                    continue
-                artist_id = album["artists"][0]["id"] if album.get("artists") else None
-                artist_info = artist_genre_map.get(artist_id, {})
-                popularity = artist_info.get("popularity", 0)
-                artist_genres = artist_info.get("genres", [])
-
-                if popularity > max_popularity:
-                    continue
-                if any(genre.lower() in ag.lower() for ag in artist_genres):
-                    matched_album = album
+        # Pass 3: last resort — just take the first unused track regardless of
+        # popularity or repeat history so we always have something to post.
+        if not matched:
+            logger.warning("No filtered match for '%s' — using first available track", genre)
+            for track in tracks:
+                album_id = track.get("album", {}).get("id")
+                if album_id not in used_album_ids:
+                    matched = track
                     break
 
-        # Pass 3: last resort — just take the next unused album regardless of
-        # genre, popularity, or repeat history so the post always has content.
-        if not matched_album:
-            logger.warning(
-                "No filtered match for '%s' — using next available release", genre
-            )
-            for album in albums:
-                if album["id"] not in used_album_ids:
-                    matched_album = album
-                    break
-
-        if matched_album:
-            used_album_ids.add(matched_album["id"])
-            releases.append(_album_to_release_dict(matched_album, genre))
+        if matched:
+            album_id = matched.get("album", {}).get("id")
+            if album_id:
+                used_album_ids.add(album_id)
+            releases.append(_track_to_release_dict(matched, genre))
 
     return releases
