@@ -8,12 +8,16 @@ required — which is appropriate for reading public catalog data like albums.
 
 Strategy
 --------
-Spotify's genre: search filter is unreliable and effectively deprecated.
-Instead we use two official endpoints:
+Spotify has deprecated two approaches we tried previously:
+  - The genre: search filter returns no results for most queries.
+  - The /v1/browse/new-releases endpoint returns 403 for newer app registrations.
 
-  1. sp.new_releases(limit=50)
-       Spotify's curated "new releases" browse endpoint. Returns the most
-       recently released albums globally. Reliable and always returns results.
+Current working approach:
+
+  1. sp.search(q='tag:new', type='album', limit=50)
+       The tag:new search filter is Spotify's own flag for newly released albums.
+       Searching by it via the standard search API avoids the deprecated browse
+       endpoint and reliably returns a fresh batch of recent releases.
 
   2. sp.artists([id, id, ...])
        Batch-fetches genre tags for up to 50 artists in a single API call.
@@ -83,7 +87,7 @@ def get_new_releases(genres: list[str]) -> list[dict]:
 
     Approach
     --------
-    1. Call sp.new_releases() to get up to 50 recently released albums.
+    1. Search Spotify with tag:new to get up to 50 recently released albums.
     2. Batch-fetch genre tags for all their primary artists in one API call.
     3. For each target genre, find the first album whose artist has a matching
        genre tag. If no match is found, fall back to the next unused album so
@@ -101,16 +105,19 @@ def get_new_releases(genres: list[str]) -> list[dict]:
         May be shorter than the input list only if Spotify returns no albums
         at all (very unlikely).
     """
-    # ── Step 1: fetch new releases ────────────────────────────────────────────
+    # ── Step 1: fetch new releases via tag:new search ────────────────────────
+    # The browse/new-releases endpoint is deprecated (returns 403). The tag:new
+    # search filter is the supported replacement — it flags recently released
+    # albums the same way Spotify's own "New Releases" section does.
     try:
-        result = _sp.new_releases(limit=50)
+        result = _sp.search(q="tag:new", type="album", limit=50)
         albums = result["albums"]["items"]
     except spotipy.SpotifyException as exc:
         logger.error("Failed to fetch new releases from Spotify: %s", exc)
         return []
 
     if not albums:
-        logger.warning("Spotify new_releases returned no albums")
+        logger.warning("Spotify tag:new search returned no albums")
         return []
 
     logger.info("Fetched %d new releases from Spotify", len(albums))
