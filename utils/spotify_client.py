@@ -110,7 +110,7 @@ def get_new_releases(genres: list[str]) -> list[dict]:
     # search filter is the supported replacement — it flags recently released
     # albums the same way Spotify's own "New Releases" section does.
     try:
-        result = _sp.search(q="tag:new", type="album", limit=50)
+        result = _sp.search(q="tag:new", type="album", limit=20)
         albums = result["albums"]["items"]
     except spotipy.SpotifyException as exc:
         logger.error("Failed to fetch new releases from Spotify: %s", exc)
