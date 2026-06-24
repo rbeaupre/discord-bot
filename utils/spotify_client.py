@@ -53,8 +53,11 @@ _sp = spotipy.Spotify(
 
 # Tracks with a Spotify popularity score above this threshold are considered
 # mainstream and skipped in the first pass. Scale is 0–100.
-# 60 cuts out well-known chart acts while keeping moderately known artists.
-_DEFAULT_MAX_POPULARITY = 60
+# 75 allows moderately known indie/rock/electronic acts through while still
+# filtering out top-40 chart staples. The keyword search for genre year:YYYY
+# tends to surface tracks in the 60–75 range, so 60 was too strict — passes
+# 1 and 2 both failed and pass 3 (no filter) fired unconditionally every time.
+_DEFAULT_MAX_POPULARITY = 75
 
 
 def _track_to_release_dict(track: dict, genre: str) -> dict:
