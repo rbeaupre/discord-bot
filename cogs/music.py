@@ -26,7 +26,7 @@ Default schedule: every Monday at 10:00 AM Eastern Time in #new_releases.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import discord
 from apscheduler.triggers.cron import CronTrigger
@@ -50,6 +50,15 @@ _DEFAULT_CHANNEL_NAME = "new_releases"
 
 # Valid weekday abbreviations accepted by APScheduler's CronTrigger.
 _VALID_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+# How far back to look when building the artist exclusion list.
+# Artists posted within this window won't be featured again.
+_EXCLUSION_WINDOW_DAYS = 90  # 3 months
+
+
+def _exclusion_cutoff() -> datetime:
+    """Return the earliest posted_at timestamp still within the exclusion window."""
+    return datetime.utcnow() - timedelta(days=_EXCLUSION_WINDOW_DAYS)
 
 
 def _job_id(guild_id: int) -> str:
@@ -143,12 +152,15 @@ class MusicCog(commands.Cog, name="Music"):
                 cfg.content_options.get("genres", _DEFAULT_GENRES)
                 if cfg else _DEFAULT_GENRES
             )
-            # Load every artist ID ever posted in this guild to use as the
-            # exclusion list — prevents artists from being repeated.
+            # Load artist IDs posted in the last 3 months — artists outside
+            # that window are allowed to cycle back into the rotation.
             posted_artist_ids = [
                 row.artist_id
                 for row in session.query(MusicPost)
-                .filter_by(guild_id=guild_id)
+                .filter(
+                    MusicPost.guild_id == guild_id,
+                    MusicPost.posted_at >= _exclusion_cutoff(),
+                )
                 .all()
             ]
 
@@ -265,7 +277,10 @@ class MusicCog(commands.Cog, name="Music"):
             posted_artist_ids = [
                 row.artist_id
                 for row in session.query(MusicPost)
-                .filter_by(guild_id=interaction.guild_id)
+                .filter(
+                    MusicPost.guild_id == interaction.guild_id,
+                    MusicPost.posted_at >= _exclusion_cutoff(),
+                )
                 .all()
             ]
 
