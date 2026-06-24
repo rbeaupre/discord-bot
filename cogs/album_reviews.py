@@ -244,10 +244,10 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
             # Non-fatal — the post works fine without a Spotify link.
             logger.warning("Spotify lookup failed for '%s — %s': %s", artist, album, exc)
 
-        # Build the embed. The title is clickable and links to the Pitchfork review.
+        # Build the embed. The Pitchfork link appears only in the Links field
+        # at the bottom — no url= on the embed so the title isn't also a link.
         embed = discord.Embed(
-            title=album,
-            url=pitchfork_url,
+            title=f"Album Review — {album}",
             description=f"**{score} / 10** — Pitchfork Best New Album\n\n{summary}",
             color=discord.Color.orange(),
             timestamp=datetime.utcnow(),

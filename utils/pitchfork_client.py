@@ -194,7 +194,12 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
 
                 album = album_data.get("album") or album_data.get("title")
 
-                score_raw = album_data.get("score") or album_data.get("rating")
+                # Use explicit key checks rather than `or` chaining so that a
+                # score of 0.0 (falsy) isn't silently skipped.
+                score_raw = (
+                    album_data["score"] if "score" in album_data
+                    else album_data.get("rating")
+                )
                 if score_raw is not None:
                     score = float(score_raw)
 
@@ -272,8 +277,10 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
             el = soup.select_one(selector)
             if el:
                 text = el.get_text().strip()
-                # Pitchfork scores are decimals between 0.0 and 10.0.
-                match = re.search(r"\b(10(?:\.0)?|[0-9](?:\.[0-9])?)\b", text)
+                # Pitchfork scores are always written with a decimal (e.g. "8.2",
+                # "10.0"). Requiring the decimal prevents matching stray "0" or
+                # other single digits that appear in unrelated page elements.
+                match = re.search(r"\b(10\.0|[0-9]\.[0-9])\b", text)
                 if match:
                     score = float(match.group(1))
                     break

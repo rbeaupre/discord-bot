@@ -237,21 +237,28 @@ def find_album_url(artist: str, album: str) -> str | None:
         The Spotify album page URL, or None if no match is found or the
         search fails (e.g. 403 on restricted app tier).
     """
-    try:
-        result = _sp.search(
-            q=f"artist:{artist} album:{album}",
-            type="album",
-            limit=1,
-        )
-        items = result.get("albums", {}).get("items", [])
-        if items:
-            url = items[0].get("external_urls", {}).get("spotify")
-            if url:
-                logger.debug("Spotify album match for '%s — %s': %s", artist, album, url)
-            return url
-    except spotipy.SpotifyException as exc:
-        logger.error(
-            "Spotify album search failed for '%s — %s': %s", artist, album, exc
-        )
+    # Try with field filters first (most precise), then fall back to a plain
+    # keyword search if the restricted app tier blocks the filtered query.
+    queries = [
+        f"artist:{artist} album:{album}",
+        f"{artist} {album}",
+    ]
+    for query in queries:
+        try:
+            result = _sp.search(q=query, type="album", limit=1)
+            items = result.get("albums", {}).get("items", [])
+            if items:
+                url = items[0].get("external_urls", {}).get("spotify")
+                if url:
+                    logger.debug(
+                        "Spotify album match for '%s — %s' (query: %r): %s",
+                        artist, album, query, url,
+                    )
+                return url
+        except spotipy.SpotifyException as exc:
+            logger.warning(
+                "Spotify album search failed for query %r: %s — trying next", query, exc
+            )
+            continue
 
     return None
