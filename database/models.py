@@ -8,12 +8,15 @@ Tables
 birthdays        — One row per registered user birthday per guild.
 schedule_configs — One row per (guild, feature) pair storing the channel,
                    posting schedule, and content options for each bot feature.
+music_posts      — One row per release posted by the music feature. Used to
+                   prevent the same artist from being posted repeatedly.
 """
 
 import json
 
-from sqlalchemy import BigInteger, Column, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Column, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase
+from datetime import datetime
 
 
 class Base(DeclarativeBase):
@@ -138,4 +141,41 @@ class ScheduleConfig(Base):
         return (
             f"<ScheduleConfig guild={self.guild_id} feature={self.feature} "
             f"channel={self.channel_id} {self.hour:02d}:{self.minute:02d}>"
+        )
+
+
+class MusicPost(Base):
+    """
+    Records every release the music feature has posted in a guild.
+
+    Used to prevent the same artist from appearing in the weekly post more
+    than once. Before fetching new releases, the cog queries this table for
+    all artist IDs ever posted in the guild and passes them to the Spotify
+    client as an exclusion list.
+
+    There is no cap on history — artists are excluded indefinitely unless
+    the row is manually deleted from the database.
+    """
+
+    __tablename__ = "music_posts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this post belongs to.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # Spotify artist ID — used as the exclusion key in future searches.
+    artist_id = Column(String(100), nullable=False)
+
+    # Human-readable fields stored for reference and future admin commands.
+    artist_name = Column(String(200), nullable=False)
+    release_title = Column(String(200), nullable=False)
+
+    # When this release was posted (UTC).
+    posted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"<MusicPost guild={self.guild_id} artist={self.artist_name!r} "
+            f"release={self.release_title!r} posted={self.posted_at}>"
         )

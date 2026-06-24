@@ -34,7 +34,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from database.db import SessionLocal
-from database.models import ScheduleConfig
+from database.models import MusicPost, ScheduleConfig
 from utils.claude_client import describe_release
 from utils.spotify_client import get_new_releases
 
@@ -143,6 +143,14 @@ class MusicCog(commands.Cog, name="Music"):
                 cfg.content_options.get("genres", _DEFAULT_GENRES)
                 if cfg else _DEFAULT_GENRES
             )
+            # Load every artist ID ever posted in this guild to use as the
+            # exclusion list — prevents artists from being repeated.
+            posted_artist_ids = [
+                row.artist_id
+                for row in session.query(MusicPost)
+                .filter_by(guild_id=guild_id)
+                .all()
+            ]
 
         channel = self._resolve_channel(guild, channel_id, _DEFAULT_CHANNEL_NAME)
         if channel is None:
@@ -152,27 +160,37 @@ class MusicCog(commands.Cog, name="Music"):
             )
             return
 
-        await self._send_releases_embed(channel, genres)
+        releases = await self._send_releases_embed(channel, genres, posted_artist_ids)
+
+        # Record what we just posted so these artists are excluded next time.
+        if releases:
+            await self._record_posted_artists(guild_id, releases)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Embed builder
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _send_releases_embed(
-        self, channel: discord.TextChannel, genres: list[str]
-    ) -> None:
+        self,
+        channel: discord.TextChannel,
+        genres: list[str],
+        recent_artist_ids: list[str] | None = None,
+    ) -> list[dict]:
         """
         Fetch new releases from Spotify, generate Claude blurbs, and post
         a single embed listing all genres. Each genre gets one field showing
         the artist, album, Spotify link, and a Claude-written description.
+
+        Returns the list of releases that were posted so the caller can save
+        the artist IDs to the recent-history list in the database.
         """
-        releases = get_new_releases(genres)
+        releases = get_new_releases(genres, exclude_artist_ids=recent_artist_ids or [])
 
         if not releases:
             await channel.send(
                 "Could not find any new releases this week. Try `/music releases` again later."
             )
-            return
+            return []
 
         embed = discord.Embed(
             title="New Releases This Week",
@@ -215,6 +233,7 @@ class MusicCog(commands.Cog, name="Music"):
         embed.set_footer(text="Use /music releases to fetch new releases any time!")
 
         await channel.send(embed=embed)
+        return releases
 
     # ──────────────────────────────────────────────────────────────────────────
     # Slash commands
@@ -243,8 +262,20 @@ class MusicCog(commands.Cog, name="Music"):
                 cfg.content_options.get("genres", _DEFAULT_GENRES)
                 if cfg else _DEFAULT_GENRES
             )
+            posted_artist_ids = [
+                row.artist_id
+                for row in session.query(MusicPost)
+                .filter_by(guild_id=interaction.guild_id)
+                .all()
+            ]
 
-        await self._send_releases_embed(interaction.channel, genres)
+        releases = await self._send_releases_embed(
+            interaction.channel, genres, posted_artist_ids
+        )
+
+        if releases:
+            await self._record_posted_artists(interaction.guild_id, releases)
+
         await interaction.followup.send("New releases posted!", ephemeral=True)
 
     # ── Admin config subgroup: /music config ──────────────────────────────────
@@ -422,6 +453,31 @@ class MusicCog(commands.Cog, name="Music"):
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers
     # ──────────────────────────────────────────────────────────────────────────
+
+    async def _record_posted_artists(
+        self, guild_id: int, releases: list[dict]
+    ) -> None:
+        """
+        Write a MusicPost row for each release that was just posted.
+        These rows are read back on the next post to exclude the same artists,
+        preventing the weekly releases from repeating the same acts indefinitely.
+        """
+        with SessionLocal() as session:
+            for release in releases:
+                artist_id = release.get("artist_id")
+                if not artist_id:
+                    continue
+                session.add(MusicPost(
+                    guild_id=guild_id,
+                    artist_id=artist_id,
+                    artist_name=release.get("artist", "Unknown"),
+                    release_title=release.get("title", "Unknown"),
+                ))
+            session.commit()
+
+        logger.debug(
+            "Recorded %d posted artists for guild %d", len(releases), guild_id
+        )
 
     def _resolve_channel(
         self,
