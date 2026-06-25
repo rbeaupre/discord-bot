@@ -244,10 +244,11 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
             # Non-fatal — the post works fine without a Spotify link.
             logger.warning("Spotify lookup failed for '%s — %s': %s", artist, album, exc)
 
-        # Build the embed. The Pitchfork link appears only in the Links field
-        # at the bottom — no url= on the embed so the title isn't also a link.
+        # Build the embed. The title is clickable and links to the Pitchfork
+        # review — no separate "Read on Pitchfork" link needed at the bottom.
         embed = discord.Embed(
             title=f"Album Review — {album}",
+            url=pitchfork_url,
             description=f"**{score} / 10** — Pitchfork Best New Album\n\n{summary}",
             color=discord.Color.orange(),
             timestamp=datetime.utcnow(),
@@ -260,11 +261,12 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
         if image_url:
             embed.set_thumbnail(url=image_url)
 
-        # Links section — Spotify is optional if the lookup failed.
-        links: list[str] = [f"[Read on Pitchfork]({pitchfork_url})"]
+        # Only show the Links field if we have a Spotify URL — the Pitchfork
+        # link is already on the title so we don't need to repeat it here.
         if spotify_url:
-            links.append(f"[Listen on Spotify]({spotify_url})")
-        embed.add_field(name="Links", value="  •  ".join(links), inline=False)
+            embed.add_field(
+                name="Listen", value=f"[Open on Spotify]({spotify_url})", inline=False
+            )
 
         embed.set_footer(text="Use /album post to fetch the latest review any time")
 

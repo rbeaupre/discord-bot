@@ -85,6 +85,56 @@ def _fetch(url: str) -> BeautifulSoup:
     return BeautifulSoup(response.text, "html.parser")
 
 
+def _find_score_in_dict(data: dict | list, depth: int = 0) -> float | None:
+    """
+    Recursively walk a __NEXT_DATA__ JSON structure looking for a field named
+    "rating" or "score" whose value is a plausible Pitchfork score (0.1–10.0).
+
+    Pitchfork has changed where the score lives across site versions — sometimes
+    it's at the top level of the review object, sometimes it's nested several
+    levels deep under tombstone → albums → rating → rating. Walking the tree
+    handles all of these without hardcoding a specific path.
+
+    Parameters
+    ----------
+    data  : The dict or list to search.
+    depth : Current recursion depth — stops at 8 to avoid runaway traversal.
+
+    Returns
+    -------
+    float or None
+        The first score found, or None if nothing plausible is in the tree.
+    """
+    if depth > 8:
+        return None
+
+    items = data.items() if isinstance(data, dict) else enumerate(data)
+    for key, val in items:
+        # A key named "rating" or "score" with a scalar value is a candidate.
+        if key in ("rating", "score") and isinstance(val, (int, float, str)):
+            try:
+                parsed = float(val)
+                # Valid Pitchfork scores are between 0.1 and 10.0 — a value of
+                # 0 means we hit the wrong field (e.g. an array index).
+                if 0.1 <= parsed <= 10.0:
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+        # Recurse into nested dicts and lists.
+        if isinstance(val, dict):
+            result = _find_score_in_dict(val, depth + 1)
+            if result is not None:
+                return result
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, (dict, list)):
+                    result = _find_score_in_dict(item, depth + 1)
+                    if result is not None:
+                        return result
+
+    return None
+
+
 def _try_next_data(soup: BeautifulSoup) -> dict | None:
     """
     Try to read structured page data from Next.js's __NEXT_DATA__ script tag.
@@ -194,14 +244,17 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
 
                 album = album_data.get("album") or album_data.get("title")
 
-                # Use explicit key checks rather than `or` chaining so that a
-                # score of 0.0 (falsy) isn't silently skipped.
-                score_raw = (
-                    album_data["score"] if "score" in album_data
-                    else album_data.get("rating")
-                )
-                if score_raw is not None:
-                    score = float(score_raw)
+                # Walk the entire album_data subtree for a valid score rather
+                # than checking only the top-level key. Pitchfork has moved the
+                # rating field across multiple nesting levels over the years
+                # (e.g. tombstone → albums[0] → rating → rating). A top-level
+                # "score" key of 0 appears in some versions and is not the real
+                # rating — _find_score_in_dict skips 0 and keeps looking.
+                score = _find_score_in_dict(album_data)
+                if score is not None:
+                    logger.debug(
+                        "__NEXT_DATA__ score found for %s: %.1f", url, score
+                    )
 
                 # Review body may be an HTML string or a list of content blocks.
                 body = album_data.get("body") or album_data.get("reviewBody") or ""
@@ -267,23 +320,36 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
                     album = album_part.strip()
 
     if score is None:
-        for selector in [
-            "[class*='Rating']",
-            "[class*='score']",
-            "[class*='Score']",
-            "span.score",
-            "[data-testid='score']",
-        ]:
-            el = soup.select_one(selector)
-            if el:
-                text = el.get_text().strip()
-                # Pitchfork scores are always written with a decimal (e.g. "8.2",
-                # "10.0"). Requiring the decimal prevents matching stray "0" or
-                # other single digits that appear in unrelated page elements.
-                match = re.search(r"\b(10\.0|[0-9]\.[0-9])\b", text)
-                if match:
-                    score = float(match.group(1))
-                    break
+        # Primary HTML approach: target the ScoreCircle div that wraps the score
+        # on Pitchfork review pages. The structure is:
+        #   <div class="ScoreCircle-..."><p class="Rating-...">8.3</p></div>
+        # Using [class*='ScoreCircle'] matches the wrapper regardless of the
+        # generated suffix on the class name, which changes between deploys.
+        score_circle = soup.select_one("[class*='ScoreCircle']")
+        if score_circle:
+            # The score is in the <p> inside the circle, or the circle itself.
+            p = score_circle.find("p")
+            text = (p or score_circle).get_text(strip=True)
+            match = re.fullmatch(r"10\.0|[0-9]\.[0-9]", text)
+            if match:
+                score = float(text)
+                logger.debug("Score found via ScoreCircle selector: %.1f", score)
+
+    if score is None:
+        # Fallback: walk every element looking for one whose ENTIRE text is
+        # exactly a score-shaped decimal. Since Pitchfork displays the score as
+        # a bare number ("8.3") with nothing else in its element, fullmatch is
+        # precise enough to avoid false positives on other numeric content.
+        _SCORE_RE = re.compile(r"^(10\.0|[0-9]\.[0-9])$")
+        for el in soup.find_all(True):
+            text = el.get_text(strip=True)
+            if _SCORE_RE.fullmatch(text):
+                score = float(text)
+                logger.debug(
+                    "Score found via exact-text element match <%s>: %.1f",
+                    el.name, score,
+                )
+                break
 
     if not review_text:
         for selector in [
