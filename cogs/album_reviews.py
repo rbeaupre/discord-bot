@@ -244,10 +244,13 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
 
         # Build the embed. The title is clickable and links to the Pitchfork
         # review — no separate "Read on Pitchfork" link needed at the bottom.
+        # Append the Spotify link inline in the description to avoid a bold
+        # field header above it.
+        spotify_line = f"\n\n[Listen on Spotify]({spotify_url})" if spotify_url else ""
         embed = discord.Embed(
             title=f"Album Review — {album}",
             url=pitchfork_url,
-            description=f"Pitchfork Best New Album\n\n{summary}",
+            description=f"Pitchfork Best New Album\n\n{summary}{spotify_line}",
             color=discord.Color.orange(),
             timestamp=datetime.utcnow(),
         )
@@ -255,16 +258,9 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
         # Show artist name in the author line above the title.
         embed.set_author(name=artist)
 
-        # Album cover art as the embed thumbnail.
+        # Album cover art as a full-width image below the description.
         if image_url:
-            embed.set_thumbnail(url=image_url)
-
-        # Only show the Links field if we have a Spotify URL — the Pitchfork
-        # link is already on the title so we don't need to repeat it here.
-        if spotify_url:
-            embed.add_field(
-                name="Listen", value=f"[Open on Spotify]({spotify_url})", inline=False
-            )
+            embed.set_image(url=image_url)
 
         embed.set_footer(text="Use /album post to fetch the latest review any time")
 
