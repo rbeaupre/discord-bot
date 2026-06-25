@@ -231,6 +231,12 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
             )
 
             if album_data:
+                # Log the top-level keys so we can find the real score path.
+                logger.info(
+                    "__NEXT_DATA__ album_data keys for %s: %s",
+                    url, list(album_data.keys())
+                )
+
                 # Artist — stored as a list of dicts or a plain string depending
                 # on the site version.
                 artists_raw = album_data.get("artists") or album_data.get("artist") or []
@@ -323,33 +329,40 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
         # Primary HTML approach: target the ScoreCircle div that wraps the score
         # on Pitchfork review pages. The structure is:
         #   <div class="ScoreCircle-..."><p class="Rating-...">8.3</p></div>
-        # Using [class*='ScoreCircle'] matches the wrapper regardless of the
-        # generated suffix on the class name, which changes between deploys.
+        # Note: Pitchfork's SSR often renders a "0.0" placeholder that JS
+        # replaces after load — we explicitly reject that value.
         score_circle = soup.select_one("[class*='ScoreCircle']")
         if score_circle:
-            # The score is in the <p> inside the circle, or the circle itself.
             p = score_circle.find("p")
             text = (p or score_circle).get_text(strip=True)
+            logger.info("ScoreCircle element text: %r", text)
             match = re.fullmatch(r"10\.0|[0-9]\.[0-9]", text)
             if match:
-                score = float(text)
-                logger.debug("Score found via ScoreCircle selector: %.1f", score)
+                candidate = float(text)
+                if candidate > 0:
+                    score = candidate
+                    logger.debug("Score found via ScoreCircle selector: %.1f", score)
+                else:
+                    logger.info(
+                        "ScoreCircle contained placeholder 0.0 — "
+                        "score is client-side rendered, falling back"
+                    )
 
     if score is None:
-        # Fallback: walk every element looking for one whose ENTIRE text is
-        # exactly a score-shaped decimal. Since Pitchfork displays the score as
-        # a bare number ("8.3") with nothing else in its element, fullmatch is
-        # precise enough to avoid false positives on other numeric content.
+        # Fallback: walk every element for one whose ENTIRE text is exactly a
+        # score-shaped decimal, again rejecting 0.0 placeholders.
         _SCORE_RE = re.compile(r"^(10\.0|[0-9]\.[0-9])$")
         for el in soup.find_all(True):
             text = el.get_text(strip=True)
             if _SCORE_RE.fullmatch(text):
-                score = float(text)
-                logger.debug(
-                    "Score found via exact-text element match <%s>: %.1f",
-                    el.name, score,
-                )
-                break
+                candidate = float(text)
+                if candidate > 0:
+                    score = candidate
+                    logger.debug(
+                        "Score found via exact-text element match <%s>: %.1f",
+                        el.name, score,
+                    )
+                    break
 
     if not review_text:
         for selector in [
@@ -379,13 +392,19 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
             image_url = og_image.get("content")
 
     # ── Validate required fields ──────────────────────────────────────────────
+    # Score is desirable but not strictly required — if we can't extract it
+    # (e.g. Pitchfork renders it client-side), the post still goes out and
+    # the logs will show the album_data keys so we can fix the path later.
+    if score is None:
+        logger.warning(
+            "Could not extract score from %s — will post without it", url
+        )
+
     missing = []
     if not artist:
         missing.append("artist")
     if not album:
         missing.append("album title")
-    if score is None:
-        missing.append("score")
 
     if missing:
         raise PitchforkScrapingError(

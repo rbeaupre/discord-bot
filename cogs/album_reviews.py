@@ -246,10 +246,11 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
 
         # Build the embed. The title is clickable and links to the Pitchfork
         # review — no separate "Read on Pitchfork" link needed at the bottom.
+        score_line = f"**{score} / 10** — " if score else ""
         embed = discord.Embed(
             title=f"Album Review — {album}",
             url=pitchfork_url,
-            description=f"**{score} / 10** — Pitchfork Best New Album\n\n{summary}",
+            description=f"{score_line}Pitchfork Best New Album\n\n{summary}",
             color=discord.Color.orange(),
             timestamp=datetime.utcnow(),
         )
