@@ -15,7 +15,7 @@ describe_release(artist, title, genre)  → str
     Write a short hype blurb for a Spotify release to include in the
     weekly music post.
 
-summarize_pitchfork_review(artist, album, score, review_text)  → str
+summarize_pitchfork_review(artist, album, review_text)  → str
     Summarize a Pitchfork album review into 3–4 sentences for the
     monthly album review embed.
 """
@@ -166,7 +166,7 @@ Keep it casual, enthusiastic, and informative. No hashtags. Return only the blur
 
 
 def summarize_pitchfork_review(
-    artist: str, album: str, score: float, review_text: str
+    artist: str, album: str, review_text: str
 ) -> str:
     """
     Ask Claude to write a concise summary of a Pitchfork album review.
@@ -179,7 +179,6 @@ def summarize_pitchfork_review(
     ----------
     artist      : Artist name as scraped from Pitchfork.
     album       : Album title as scraped from Pitchfork.
-    score       : Pitchfork's numeric score, e.g. 8.5.
     review_text : Excerpted body text from the Pitchfork review (may be
                   truncated at _REVIEW_TEXT_MAX_CHARS by the scraper).
 
@@ -196,7 +195,6 @@ Keep it engaging and conversational — this is for a group of music-loving frie
 
 Album: {album}
 Artist: {artist}
-Pitchfork Score: {score}/10
 
 Review excerpt:
 {review_text}

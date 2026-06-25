@@ -18,8 +18,13 @@ Public functions
 ----------------
 get_latest_best_new_album()  → dict
     Scrape the Best New Albums listing page and return data for the most
-    recently featured album: artist, title, score, review text, Pitchfork
-    URL, and cover art URL.
+    recently featured album: artist, title, review text, Pitchfork URL,
+    and cover art URL.
+
+Note on scores: Pitchfork renders scores client-side via JavaScript. Since
+this scraper uses requests (no browser runtime), scores are always a
+placeholder "0.0" in the HTML and cannot be reliably extracted. Score
+extraction has been removed; the embed posts without a score.
 """
 
 import json
@@ -85,55 +90,6 @@ def _fetch(url: str) -> BeautifulSoup:
     return BeautifulSoup(response.text, "html.parser")
 
 
-def _find_score_in_dict(data: dict | list, depth: int = 0) -> float | None:
-    """
-    Recursively walk a __NEXT_DATA__ JSON structure looking for a field named
-    "rating" or "score" whose value is a plausible Pitchfork score (0.1–10.0).
-
-    Pitchfork has changed where the score lives across site versions — sometimes
-    it's at the top level of the review object, sometimes it's nested several
-    levels deep under tombstone → albums → rating → rating. Walking the tree
-    handles all of these without hardcoding a specific path.
-
-    Parameters
-    ----------
-    data  : The dict or list to search.
-    depth : Current recursion depth — stops at 8 to avoid runaway traversal.
-
-    Returns
-    -------
-    float or None
-        The first score found, or None if nothing plausible is in the tree.
-    """
-    if depth > 8:
-        return None
-
-    items = data.items() if isinstance(data, dict) else enumerate(data)
-    for key, val in items:
-        # A key named "rating" or "score" with a scalar value is a candidate.
-        if key in ("rating", "score") and isinstance(val, (int, float, str)):
-            try:
-                parsed = float(val)
-                # Valid Pitchfork scores are between 0.1 and 10.0 — a value of
-                # 0 means we hit the wrong field (e.g. an array index).
-                if 0.1 <= parsed <= 10.0:
-                    return parsed
-            except (ValueError, TypeError):
-                pass
-        # Recurse into nested dicts and lists.
-        if isinstance(val, dict):
-            result = _find_score_in_dict(val, depth + 1)
-            if result is not None:
-                return result
-        if isinstance(val, list):
-            for item in val:
-                if isinstance(item, (dict, list)):
-                    result = _find_score_in_dict(item, depth + 1)
-                    if result is not None:
-                        return result
-
-    return None
-
 
 def _try_next_data(soup: BeautifulSoup) -> dict | None:
     """
@@ -167,10 +123,15 @@ def _extract_review_links(soup: BeautifulSoup) -> list[str]:
     Returns a de-duplicated list of absolute URLs in page order (most recent
     album is first on the page).
     """
+    # Matches /reviews/albums/<slug> — requires at least one non-empty segment
+    # after the trailing slash so the listing page itself (/reviews/albums/)
+    # is never included in the results.
+    _REVIEW_PATH_RE = re.compile(r"/reviews/albums/[^/]+")
+
     links: list[str] = []
     for tag in soup.find_all("a", href=True):
         href = tag["href"]
-        if "/reviews/albums/" in href:
+        if _REVIEW_PATH_RE.search(href):
             # Convert relative paths ("/reviews/albums/...") to absolute.
             if href.startswith("/"):
                 href = _BASE_URL + href
@@ -198,7 +159,6 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
     dict with keys:
         artist        – artist name (str)
         album         – album title (str)
-        score         – Pitchfork score as a float, e.g. 8.5
         review_text   – first several paragraphs of the review body (str)
         pitchfork_url – full URL to the review page (str)
         image_url     – cover art URL (str or None)
@@ -206,11 +166,10 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
     Raises
     ------
     PitchforkScrapingError
-        If artist, album title, or score cannot be determined.
+        If artist or album title cannot be determined.
     """
     artist: str | None = None
     album: str | None = None
-    score: float | None = None
     review_text: str = ""
     image_url: str | None = None
 
@@ -231,7 +190,7 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
             )
 
             if album_data:
-                # Log the top-level keys so we can find the real score path.
+                # Log the top-level keys for debugging future site structure changes.
                 logger.info(
                     "__NEXT_DATA__ album_data keys for %s: %s",
                     url, list(album_data.keys())
@@ -249,18 +208,6 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
                     artist = artists_raw
 
                 album = album_data.get("album") or album_data.get("title")
-
-                # Walk the entire album_data subtree for a valid score rather
-                # than checking only the top-level key. Pitchfork has moved the
-                # rating field across multiple nesting levels over the years
-                # (e.g. tombstone → albums[0] → rating → rating). A top-level
-                # "score" key of 0 appears in some versions and is not the real
-                # rating — _find_score_in_dict skips 0 and keeps looking.
-                score = _find_score_in_dict(album_data)
-                if score is not None:
-                    logger.debug(
-                        "__NEXT_DATA__ score found for %s: %.1f", url, score
-                    )
 
                 # Review body may be an HTML string or a list of content blocks.
                 body = album_data.get("body") or album_data.get("reviewBody") or ""
@@ -314,7 +261,10 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
                 break
 
         # Last resort: parse artist and album from the HTML <title> tag.
-        # Pitchfork's <title> is typically "Artist: Album | Pitchfork".
+        # Pitchfork's <title> is typically "Artist: Album Review | Pitchfork"
+        # or "Artist: Album | Pitchfork". We strip the trailing " Album Review"
+        # phrase that Pitchfork appends to the page title so it doesn't end up
+        # in the embed title.
         if not album:
             title_tag = soup.find("title")
             if title_tag:
@@ -323,46 +273,9 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
                     artist_part, album_part = raw_title.split(":", 1)
                     if not artist:
                         artist = artist_part.strip()
-                    album = album_part.strip()
-
-    if score is None:
-        # Primary HTML approach: target the ScoreCircle div that wraps the score
-        # on Pitchfork review pages. The structure is:
-        #   <div class="ScoreCircle-..."><p class="Rating-...">8.3</p></div>
-        # Note: Pitchfork's SSR often renders a "0.0" placeholder that JS
-        # replaces after load — we explicitly reject that value.
-        score_circle = soup.select_one("[class*='ScoreCircle']")
-        if score_circle:
-            p = score_circle.find("p")
-            text = (p or score_circle).get_text(strip=True)
-            logger.info("ScoreCircle element text: %r", text)
-            match = re.fullmatch(r"10\.0|[0-9]\.[0-9]", text)
-            if match:
-                candidate = float(text)
-                if candidate > 0:
-                    score = candidate
-                    logger.debug("Score found via ScoreCircle selector: %.1f", score)
-                else:
-                    logger.info(
-                        "ScoreCircle contained placeholder 0.0 — "
-                        "score is client-side rendered, falling back"
+                    album = re.sub(
+                        r"\s+Album Review$", "", album_part.strip(), flags=re.IGNORECASE
                     )
-
-    if score is None:
-        # Fallback: walk every element for one whose ENTIRE text is exactly a
-        # score-shaped decimal, again rejecting 0.0 placeholders.
-        _SCORE_RE = re.compile(r"^(10\.0|[0-9]\.[0-9])$")
-        for el in soup.find_all(True):
-            text = el.get_text(strip=True)
-            if _SCORE_RE.fullmatch(text):
-                candidate = float(text)
-                if candidate > 0:
-                    score = candidate
-                    logger.debug(
-                        "Score found via exact-text element match <%s>: %.1f",
-                        el.name, score,
-                    )
-                    break
 
     if not review_text:
         for selector in [
@@ -392,14 +305,6 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
             image_url = og_image.get("content")
 
     # ── Validate required fields ──────────────────────────────────────────────
-    # Score is desirable but not strictly required — if we can't extract it
-    # (e.g. Pitchfork renders it client-side), the post still goes out and
-    # the logs will show the album_data keys so we can fix the path later.
-    if score is None:
-        logger.warning(
-            "Could not extract score from %s — will post without it", url
-        )
-
     missing = []
     if not artist:
         missing.append("artist")
@@ -419,7 +324,6 @@ def _parse_review_page(soup: BeautifulSoup, url: str) -> dict:
     return {
         "artist": artist,
         "album": album,
-        "score": score,
         "review_text": review_text,
         "pitchfork_url": url,
         "image_url": image_url,
@@ -440,7 +344,6 @@ def get_latest_best_new_album() -> dict:
     dict with keys:
         artist        – artist name
         album         – album title
-        score         – float, e.g. 8.5
         review_text   – excerpt of the review body for Claude to summarize
         pitchfork_url – full URL to the Pitchfork review
         image_url     – cover art URL, or None
@@ -472,8 +375,8 @@ def get_latest_best_new_album() -> dict:
             review_soup = _fetch(url)
             data = _parse_review_page(review_soup, url)
             logger.info(
-                "Parsed Pitchfork review: %s — %s (%.1f)",
-                data["artist"], data["album"], data["score"],
+                "Parsed Pitchfork review: %s — %s",
+                data["artist"], data["album"],
             )
             return data
         except PitchforkScrapingError as exc:

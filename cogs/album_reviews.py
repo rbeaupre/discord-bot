@@ -217,7 +217,6 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
         """
         artist = review_data["artist"]
         album = review_data["album"]
-        score = review_data["score"]
         review_text = review_data["review_text"]
         pitchfork_url = review_data["pitchfork_url"]
         image_url = review_data.get("image_url")
@@ -227,12 +226,11 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
             summary = summarize_pitchfork_review(
                 artist=artist,
                 album=album,
-                score=score,
                 review_text=review_text,
             )
         except Exception as exc:
-            # If Claude fails, fall back to the Pitchfork score alone rather
-            # than skipping the post entirely.
+            # If Claude fails, fall back to a generic message rather than
+            # skipping the post entirely.
             logger.error("Claude summary failed for '%s — %s': %s", artist, album, exc)
             summary = "Read the full review on Pitchfork."
 
@@ -246,11 +244,10 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
 
         # Build the embed. The title is clickable and links to the Pitchfork
         # review — no separate "Read on Pitchfork" link needed at the bottom.
-        score_line = f"**{score} / 10** — " if score else ""
         embed = discord.Embed(
             title=f"Album Review — {album}",
             url=pitchfork_url,
-            description=f"{score_line}Pitchfork Best New Album\n\n{summary}",
+            description=f"Pitchfork Best New Album\n\n{summary}",
             color=discord.Color.orange(),
             timestamp=datetime.utcnow(),
         )
@@ -284,8 +281,8 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
             session.commit()
 
         logger.info(
-            "Posted album review for guild %d: %s — %s (%.1f)",
-            guild_id, artist, album, score,
+            "Posted album review for guild %d: %s — %s",
+            guild_id, artist, album,
         )
 
     # ──────────────────────────────────────────────────────────────────────────
