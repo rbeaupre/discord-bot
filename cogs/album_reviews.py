@@ -294,9 +294,10 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
         name="post",
         description="Post the latest Pitchfork Best New Album review right now",
     )
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def album_post(self, interaction: discord.Interaction) -> None:
         """
-        On-demand album review post — any member can call this.
+        On-demand album review post — restricted to members with Manage Server permission.
 
         Unlike the scheduled job, this command always posts even if the same
         album was recently posted, since the user is explicitly requesting it.

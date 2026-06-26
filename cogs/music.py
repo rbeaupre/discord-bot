@@ -260,8 +260,9 @@ class MusicCog(commands.Cog, name="Music"):
         name="releases",
         description="Post new music releases right now",
     )
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def music_releases(self, interaction: discord.Interaction) -> None:
-        """On-demand release post — any member can call this."""
+        """On-demand release post — restricted to members with Manage Server permission."""
         await interaction.response.defer(thinking=True)
 
         with SessionLocal() as session:
