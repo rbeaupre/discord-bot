@@ -395,7 +395,14 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
         except spotipy.SpotifyException:
             raise
 
-        for item in result.get("items", []):
+        items = result.get("items", [])
+        logger.info(
+            "Playlist page offset=%d: %d items, first item keys: %s",
+            offset,
+            len(items),
+            list(items[0].keys()) if items else "[]",
+        )
+        for item in items:
             track = item.get("track")
             if not track:
                 # Local files or podcast episodes have no track object.
