@@ -4,37 +4,31 @@ utils/spotify_client.py
 Wrapper around the Spotipy library for fetching new music releases and
 reading public playlist data.
 
-Uses Spotify's Client Credentials flow — no user login or OAuth callback
-required — which is appropriate for reading public catalog data like albums
-and track search results.
+Two Spotify auth flows are used:
+
+  Client Credentials (_sp)
+    No user login required. Used for track/album search (new releases, album
+    URL lookup). Cannot access playlist endpoints on newer app registrations.
+
+  OAuth / Authorization Code (_sp_user, lazy)
+    A real Spotify user has authorized the app. Token is cached in
+    SPOTIFY_CACHE_PATH (default: .spotify_cache) and auto-refreshed by
+    Spotipy. Required for playlist_items. Run auth_spotify.py once locally
+    to generate the cache file, then copy it to the VM.
 
 Spotify API restrictions (as of 2026 for new app registrations)
 ---------------------------------------------------------------
-The following endpoints return 403 Forbidden for apps without extended access:
+The following endpoints return 403 Forbidden without extended access:
   - GET /v1/browse/new-releases
-  - GET /v1/artists (batch artist lookup — no genre tags or artist popularity)
+  - GET /v1/artists
 
-The following endpoints return 401 and require user OAuth (not just Client
-Credentials), even for public playlists, on newer app registrations:
-  - GET /v1/playlists/{id}/items
+The following endpoint returns 401 with Client Credentials and requires
+user OAuth even for public playlists on newer app registrations:
+  - GET /v1/playlists/{id}/items  ← uses _sp_user
 
-What DOES work with Client Credentials:
+What works with Client Credentials:
   - GET /v1/search with type=track, limit<=10
   - GET /v1/search with type=album, limit<=1
-
-Strategy
---------
-For each target genre we run one track search using the genre name as a keyword
-combined with a year filter: e.g. `rock year:2026`. This is a keyword search
-(not the broken genre: field filter), so it matches tracks whose title, artist
-name, or album name contains the genre word — good enough for our purposes.
-
-Each track object from the search result contains:
-  - track.popularity     (0–100) — used to filter out mainstream artists
-  - track.artists[0].id          — used to exclude previously posted artists
-  - track.album                  — album name, cover art, Spotify URL, release date
-
-No secondary API calls are needed, so we stay within the restricted tier.
 
 Public functions
 ----------------
@@ -44,22 +38,72 @@ get_playlist_artists(playlist_url)                             → list[str]
 """
 
 import logging
+import os
 import re
 from datetime import datetime
 
 import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
+from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
 
 import config
 
 logger = logging.getLogger(__name__)
 
+# Client Credentials client — used for search endpoints.
 _sp = spotipy.Spotify(
     auth_manager=SpotifyClientCredentials(
         client_id=config.SPOTIFY_CLIENT_ID,
         client_secret=config.SPOTIFY_CLIENT_SECRET,
     )
 )
+
+# OAuth client — lazily initialised on first call to get_playlist_artists().
+# None until _get_oauth_client() is called for the first time.
+_sp_user: spotipy.Spotify | None = None
+
+
+def _get_oauth_client() -> spotipy.Spotify:
+    """
+    Return the OAuth-authenticated Spotipy client, creating it on first call.
+
+    Reads the cached token from SPOTIFY_CACHE_PATH. If the cache is missing,
+    raises ValueError with instructions — the caller surfaces this to the user.
+    Spotipy auto-refreshes the access token using the stored refresh token, so
+    the cache file only needs to be generated once (via auth_spotify.py).
+
+    Raises
+    ------
+    ValueError
+        If the cache file does not exist.
+    spotipy.oauth2.SpotifyOauthError
+        If the cached refresh token has been revoked and cannot be refreshed.
+    """
+    global _sp_user
+    if _sp_user is not None:
+        return _sp_user
+
+    cache_path = config.SPOTIFY_CACHE_PATH
+    if not os.path.exists(cache_path):
+        raise ValueError(
+            f"Spotify OAuth cache not found at {cache_path!r}. "
+            "Run auth_spotify.py locally to authenticate, then copy the cache "
+            f"file to the server at {cache_path}. "
+            "See the README for setup instructions."
+        )
+
+    _sp_user = spotipy.Spotify(
+        auth_manager=SpotifyOAuth(
+            client_id=config.SPOTIFY_CLIENT_ID,
+            client_secret=config.SPOTIFY_CLIENT_SECRET,
+            redirect_uri=config.SPOTIFY_REDIRECT_URI,
+            scope="playlist-read-private",
+            cache_path=cache_path,
+            # Never open a browser — the bot runs headless in Docker.
+            open_browser=False,
+        )
+    )
+    logger.debug("Spotify OAuth client initialised from cache %r", cache_path)
+    return _sp_user
 
 # Tracks with a Spotify popularity score above this threshold are considered
 # mainstream and skipped in the first pass. Scale is 0–100.
@@ -312,6 +356,10 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
     playlist_id = match.group(1)
     logger.info("Fetching artists from Spotify playlist %s", playlist_id)
 
+    # Use the OAuth client — Client Credentials returns 401 for this endpoint
+    # on newer Spotify app registrations.
+    sp = _get_oauth_client()
+
     # Only fetch the fields we need to minimise response size.
     fields = "items(track(artists(name))),next"
 
@@ -322,7 +370,7 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
 
     while True:
         try:
-            result = _sp.playlist_items(
+            result = sp.playlist_items(
                 playlist_id,
                 fields=fields,
                 limit=limit,

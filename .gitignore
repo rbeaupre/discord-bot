@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Spotify OAuth token cache — contains a refresh token, never commit this
+.spotify_cache
+
 # Virtual environment
 .venv/
 venv/

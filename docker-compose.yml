@@ -40,6 +40,10 @@ services:
         condition: service_healthy  # don't start until Postgres is accepting connections
     env_file:
       - .env                        # loads DISCORD_TOKEN, ANTHROPIC_API_KEY, SPOTIFY_*, etc.
+    volumes:
+      # Mount the Spotify OAuth cache so the bot can import playlists.
+      # Generate .spotify_cache locally by running: python auth_spotify.py
+      - ./.spotify_cache:/app/.spotify_cache
     environment:
       # Override the DATABASE_URL from .env so the bot connects to the local
       # Postgres container instead of the SQLite file you use for quick scripts.
