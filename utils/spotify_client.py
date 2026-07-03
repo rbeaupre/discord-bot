@@ -395,14 +395,7 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
         except spotipy.SpotifyException:
             raise
 
-        items = result.get("items", [])
-        logger.info(
-            "Playlist page offset=%d: %d items, first item keys: %s",
-            offset,
-            len(items),
-            list(items[0].keys()) if items else "[]",
-        )
-        for playlist_item in items:
+        for playlist_item in result.get("items", []):
             # Spotify changed the key from "track" to "item" in a newer API version.
             track = playlist_item.get("item") or playlist_item.get("track")
             if not track:
