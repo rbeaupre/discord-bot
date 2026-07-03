@@ -461,27 +461,50 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         """
         Post a "final score" embed when a game concludes.
 
+        Handles regulation, extra time (AET), and penalty shootout (PEN) endings.
+        The embed title reflects how the game ended, and the penalty score is shown
+        in a separate field when available.
+
         Parameters
         ----------
         channel : Discord channel to post in.
         game    : Game dict — either the live ESPN dict (for STATUS_FINAL events)
                   or a synthetic dict built from DB state (for feed-disappearance
                   cases). Must contain home_team, away_team, home_score, away_score,
-                  and sport.
+                  and sport. Optionally contains status_name, home_penalty_score,
+                  and away_penalty_score.
         """
         sport = game.get("sport", "")
         label = _SPORT_LABELS.get(sport, sport.upper())
+        status_name = game.get("status_name", "")
 
         home = game["home_team"]
         away = game["away_team"]
         home_score = game["home_score"]
         away_score = game["away_score"]
+        home_pen = game.get("home_penalty_score")
+        away_pen = game.get("away_penalty_score")
 
-        # Bold scores for visual prominence.
+        # Choose an appropriate title based on how the game ended.
+        if status_name == "STATUS_FINAL_AET":
+            title = "Final (After Extra Time)"
+        elif status_name == "STATUS_FINAL_PEN":
+            title = "Final (After Penalties)"
+        else:
+            title = "Final Score"
+
+        # Regulation score is always shown in the description.
         description = f"{away} **{away_score}** — **{home_score}** {home}"
 
-        # Determine the winner. Draws are valid in soccer group stages.
-        if home_score > away_score:
+        # Determine the winner from the regulation/AET scoreline.
+        # For penalty finals the regulation score is tied, so the penalty
+        # score determines the actual winner.
+        if status_name == "STATUS_FINAL_PEN" and home_pen is not None and away_pen is not None:
+            if home_pen > away_pen:
+                result = f"{home} wins on penalties!"
+            else:
+                result = f"{away} wins on penalties!"
+        elif home_score > away_score:
             result = f"{home} wins!"
         elif away_score > home_score:
             result = f"{away} wins!"
@@ -489,12 +512,21 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             result = "Draw!"
 
         embed = discord.Embed(
-            title="Final Score",
+            title=title,
             description=description,
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(name="Result", value=result, inline=False)
+
+        # Show the penalty shootout score as an extra field when available.
+        if home_pen is not None and away_pen is not None:
+            embed.add_field(
+                name="Penalty Score",
+                value=f"{away} {away_pen} — {home_pen} {home}",
+                inline=False,
+            )
+
         embed.set_footer(text=f"{label} · Playoff")
         await channel.send(embed=embed)
 

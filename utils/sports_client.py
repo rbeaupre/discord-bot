@@ -50,13 +50,17 @@ _SPORT_ENDPOINTS: dict[str, list[str]] = {
 }
 
 # ESPN status type names for games that are currently being played.
-# Soccer uses half-specific names rather than a single "in progress" value.
+# Soccer uses half-specific names rather than a single "in progress" value,
+# and adds extra-time and shootout phases that must be tracked so scoring
+# plays during those phases are not silently dropped.
 ACTIVE_STATUSES: frozenset[str] = frozenset({
     "STATUS_IN_PROGRESS",
     "STATUS_FIRST_HALF",
     "STATUS_SECOND_HALF",
     "STATUS_HALFTIME",
     "STATUS_END_PERIOD",
+    "STATUS_EXTRA_TIME",   # soccer: extra time (overtime) in progress
+    "STATUS_SHOOTOUT",     # soccer: penalty shootout in progress
 })
 
 # ESPN status type names for games that have concluded.
@@ -157,6 +161,10 @@ def _parse_event(event: dict, sport: str) -> dict:
     away_team = "Away"
     home_score = 0
     away_score = 0
+    # Penalty shootout scores — only present when ESPN reports a shootout.
+    # None means no shootout data available (regulation or AET finish).
+    home_penalty_score: int | None = None
+    away_penalty_score: int | None = None
 
     for comp in competitors:
         name = comp.get("team", {}).get("displayName", "Unknown")
@@ -165,12 +173,23 @@ def _parse_event(event: dict, sport: str) -> dict:
         except (ValueError, TypeError):
             score = 0
 
+        # ESPN reports the penalty shootout score separately as "shootoutScore".
+        raw_pen = comp.get("shootoutScore")
+        pen_score: int | None = None
+        if raw_pen is not None:
+            try:
+                pen_score = int(raw_pen)
+            except (ValueError, TypeError):
+                pass
+
         if comp.get("homeAway") == "home":
             home_team = name
             home_score = score
+            home_penalty_score = pen_score
         elif comp.get("homeAway") == "away":
             away_team = name
             away_score = score
+            away_penalty_score = pen_score
 
     status_type = event.get("status", {}).get("type", {})
     status_name = status_type.get("name", "")
@@ -201,6 +220,8 @@ def _parse_event(event: dict, sport: str) -> dict:
         "away_team": away_team,
         "home_score": home_score,
         "away_score": away_score,
+        "home_penalty_score": home_penalty_score,
+        "away_penalty_score": away_penalty_score,
         "status_name": status_name,
         "status_detail": status_detail,
         "scoring_plays": scoring_plays,
