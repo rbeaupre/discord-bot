@@ -402,10 +402,11 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
             len(items),
             list(items[0].keys()) if items else "[]",
         )
-        for item in items:
-            track = item.get("track")
+        for playlist_item in items:
+            # Spotify changed the key from "track" to "item" in a newer API version.
+            track = playlist_item.get("item") or playlist_item.get("track")
             if not track:
-                # Local files or podcast episodes have no track object.
+                # Local files or podcast episodes may have no track object.
                 continue
             for artist in track.get("artists", []):
                 name = (artist.get("name") or "").strip()
