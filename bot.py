@@ -84,7 +84,15 @@ class DiscordBot(commands.Bot):
 
         # Load each feature cog. If one fails, log and continue so the other
         # features still work.
-        for cog_path in ["cogs.trivia", "cogs.music", "cogs.birthdays", "cogs.album_reviews"]:
+        for cog_path in [
+            "cogs.trivia",
+            "cogs.music",
+            "cogs.birthdays",
+            "cogs.album_reviews",
+            "cogs.concerts",
+            "cogs.movies",
+            "cogs.sports_scores",
+        ]:
             try:
                 await self.load_extension(cog_path)
                 logger.info("Loaded cog: %s", cog_path)
@@ -156,7 +164,7 @@ class DiscordBot(commands.Bot):
         logger.info("Joined new guild: %s (ID: %d)", guild.name, guild.id)
 
         # Each cog's _schedule_for_guild creates default config rows if missing.
-        for cog_name in ["Trivia", "Music", "Birthdays", "AlbumReviews"]:
+        for cog_name in ["Trivia", "Music", "Birthdays", "AlbumReviews", "Concerts", "Movies", "SportsScores"]:
             cog = self.get_cog(cog_name)
             if cog:
                 await cog._schedule_for_guild(guild.id)

@@ -1,6 +1,6 @@
 # Discord Bot
 
-A Discord bot for a private server with four features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, and birthday announcements. All schedules and channels are configurable per-server by admins via slash commands.
+A Discord bot for a private server with seven features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, birthday announcements, concert alerts, Criterion Collection movie night, and live playoff sports scores. All schedules and channels are configurable per-server by admins via slash commands.
 
 ---
 
@@ -9,9 +9,12 @@ A Discord bot for a private server with four features: sports trivia, weekly new
 | Feature | Default schedule | Default channel | On-demand command |
 |---|---|---|---|
 | Sports trivia | Every day at 4:00 PM ET | `#sports-chat` | `/trivia play` |
-| New music releases | Every Monday at 10:00 AM ET | `#new_releases` | `/music releases` |
-| Pitchfork album review | 1st of every month at 10:00 AM ET | `#album-reviews` | `/album post` |
+| New music releases | Every Monday at 10:00 AM ET | `#new_releases` | `/music releases` (admin) |
+| Pitchfork album review | 1st of every month at 10:00 AM ET | `#album-reviews` | `/album post` (admin) |
 | Birthday announcements | Every day at 9:00 AM ET | `#general` | — |
+| Concert alerts | Every Monday at 9:00 AM ET | `#concert-alerts` | `/concert check` (admin) |
+| Movie night | 1st of every month at 7:00 PM ET | `#movie-night` | `/movie pick` (admin) |
+| Live sports scores | Continuous during playoffs | configurable | — |
 
 ---
 
@@ -20,35 +23,49 @@ A Discord bot for a private server with four features: sports trivia, weekly new
 ### Boot sequence
 
 1. `init_db()` creates any missing database tables on startup
-2. The bot connects to Discord and loads the four feature cogs (trivia, music, birthdays, album reviews)
+2. The bot connects to Discord and loads all seven feature cogs
 3. APScheduler starts inside the same asyncio event loop as the bot
-4. `on_ready` fires in each cog — each one reads its config from the database and registers a scheduled job. If a guild has no config yet, default values are written automatically.
+4. `on_ready` fires in each cog — each one reads its config from the database and registers scheduled jobs. If a guild has no config yet, default values are written automatically.
 
 ### Database
 
-Two tables power the whole bot:
-
 **`birthdays`** — one row per registered user per server. Stores Discord IDs, the birth month and day (as separate columns for efficient daily queries), and a snapshot of the member's display name.
 
-**`schedule_configs`** — one row per feature per server. Stores the target channel ID, posting time (hour/minute/timezone), day of week for weekly features, and a JSON blob of content options (which sports or which genres to include; day of month for the album review). When an admin runs a config command, this row is updated and the APScheduler job is rescheduled immediately — no bot restart needed.
+**`schedule_configs`** — one row per feature per server. Stores the target channel ID, posting time (hour/minute/timezone), day of week for weekly features, and a JSON blob of content options (sports list, genres, cities, day of month, enabled sports, etc.). When an admin runs a config command, this row is updated and the APScheduler job is rescheduled immediately — no bot restart needed.
 
 **`music_posts`** — one row per Spotify release posted per server. The bot queries this table before each weekly post to exclude artists that have appeared in the last 90 days, preventing the same acts from cycling back too quickly.
 
 **`album_review_posts`** — one row per Pitchfork review posted per server. The Pitchfork URL is used as the deduplication key so the same album is never posted twice even if the monthly job fires more than once before Pitchfork publishes a new Best New Album.
 
+**`artist_watchlist`** — per-guild list of artists to monitor for concert alerts. Seeded with ~200 artists on first setup. New artists are auto-added when they appear in the weekly music releases post. Admins can add/remove artists manually via `/concert add` and `/concert remove`.
+
+**`concert_alerts_posted`** — one row per Ticketmaster event per server. Used to prevent the same show from being posted twice across consecutive weekly checks.
+
+**`criterion_films`** — global catalog of Criterion Collection films fetched from TMDB (shared across all guilds). Populated by `/movie setup`. Stores title, year, director, overview, and poster URL.
+
+**`movie_night_picks`** — per-guild record of which Criterion films have been featured, so the monthly rotation doesn't repeat a film until all films in the catalog have been shown (then resets automatically).
+
+**`live_game_states`** — per-guild tracking state for each in-progress or recently finished playoff game. Stores the current score, the index of the last scoring play reported, and whether the game-start embed has been posted. Used to make ESPN polling idempotent across bot restarts.
+
 ### Content generation
 
 **Trivia** — Claude (Haiku model) is prompted to return a JSON object containing the question, four answer options, the correct letter, and an explanation. The answer is posted inside a Discord spoiler tag (`||text||`) so members have to click to reveal it.
 
-**Music** — The Spotify API is queried with `genre:"rock" year:2026` style searches (one per genre) to find recent releases. Claude then writes a short hype blurb for each result. Everything is posted as a single embed with one field per genre.
+**Music** — The Spotify API is queried with `genre:"rock" year:2026` style searches (one per genre) to find recent releases. Claude then writes a short hype blurb for each result. Everything is posted as a single embed with one field per genre. Artists are also auto-added to the concert watchlist.
 
-**Album review** — The bot scrapes Pitchfork's Best New Albums page using `requests` + `BeautifulSoup`. It tries to read structured data from Next.js's `__NEXT_DATA__` JSON blob first (more reliable than HTML class names that change with redesigns), then falls back to HTML selectors. Claude summarizes the review text into 3–4 sentences, and Spotify is searched to attach a "Listen" link. If the scraper fails, a plain-text alert is posted in the channel so the admin knows to investigate.
+**Album review** — The bot scrapes Pitchfork's Best New Albums page using `requests` + `BeautifulSoup`. It tries to read structured data from Next.js's `__NEXT_DATA__` JSON blob first (more reliable than HTML class names that change with redesigns), then falls back to HTML selectors. Claude summarizes the review text into 3–4 sentences, and Spotify is searched to attach a "Listen on Spotify" link. Note: Pitchfork renders scores client-side via JavaScript so scores are not included.
 
-**Birthdays** — Purely database-driven. The daily job runs `WHERE birth_month = today AND birth_day = today` for the guild and posts an announcement embed for each match. Current server members get `@mentioned`; members who have left are referred to by their stored display name.
+**Birthdays** — Purely database-driven. The daily job runs `WHERE birth_month = today AND birth_day = today` for the guild and posts an announcement embed for each match.
+
+**Concert alerts** — Ticketmaster's Discovery API is queried for all music events in the configured cities (default: Toronto and Montreal) for the next 90 days. Results are matched against the guild's artist watchlist (case-insensitive). Matched events not already in `concert_alerts_posted` get an embed with date, venue, city, and a ticket link.
+
+**Movie night** — A random unwatched film is picked from the `criterion_films` table (those not already in `movie_night_picks` for this guild). Claude writes a short enthusiastic pitch using the TMDB overview. An embed with the poster image and director byline is posted. When all films have been picked, the guild's history resets and the rotation starts over.
+
+**Live sports scores** — ESPN's public scoreboard API is polled independently per sport. NFL fires every 15 seconds (to catch touchdown + PAT as separate events); NHL, MLB, and soccer fire every 60 seconds. Only playoff/tournament games are tracked (NFL/NHL/MLB: postseason type; soccer: FIFA Men's World Cup). A "game starting" embed is posted when a game is first detected as active, a scoring play embed is posted for each new play since the last poll, and a final score embed is posted when the game ends.
 
 ### Admin slash commands
 
-All `/config` subcommands require Administrator permissions. Changes are live immediately.
+All `/config` subcommands require Manage Server permissions. Changes are live immediately.
 
 | Command | Description |
 |---|---|
@@ -56,7 +73,7 @@ All `/config` subcommands require Administrator permissions. Changes are live im
 | `/trivia config channel #ch` | Set the trivia channel |
 | `/trivia config time 16:00` | Set the daily post time (24h ET) |
 | `/trivia config sports` | Toggle which sports are included |
-| `/music releases` | Post new releases right now |
+| `/music releases` | Post new releases right now (admin) |
 | `/music config channel #ch` | Set the music channel |
 | `/music config day mon` | Set which day of the week |
 | `/music config time 10:00` | Set the post time (24h ET) |
@@ -66,10 +83,27 @@ All `/config` subcommands require Administrator permissions. Changes are live im
 | `/birthday list` | See all registered birthdays in this server |
 | `/birthday config channel #ch` | Set the announcement channel |
 | `/birthday config time 09:00` | Set the daily check time (24h ET) |
-| `/album post` | Post the latest Pitchfork Best New Album right now |
+| `/album post` | Post the latest Pitchfork Best New Album right now (admin) |
 | `/album config channel #ch` | Set the album review channel |
 | `/album config day 1` | Set which day of the month to post (1–31) |
 | `/album config time 10:00` | Set the post time (24h ET) |
+| `/concert add <artist>` | Add an artist to the concert watchlist (admin) |
+| `/concert remove <artist>` | Remove an artist from the concert watchlist (admin) |
+| `/concert list` | Show the first 20 watchlist artists |
+| `/concert check` | Run the concert check right now (admin) |
+| `/concert config channel #ch` | Set the concert alerts channel (admin) |
+| `/concert config day mon` | Set the check day of week (admin) |
+| `/concert config time 09:00` | Set the check time (24h ET) (admin) |
+| `/movie pick` | Post a random Criterion film right now (admin) |
+| `/movie setup` | Load or refresh the Criterion catalog from TMDB (admin) |
+| `/movie config channel #ch` | Set the movie night channel (admin) |
+| `/movie config day 1` | Set which day of the month (admin) |
+| `/movie config time 19:00` | Set the post time (24h ET) (admin) |
+| `/scores status` | Show current score alert config |
+| `/scores config channel #ch` | Set the score alerts channel (admin) |
+| `/scores config sports` | Toggle individual sports on/off (admin) |
+| `/scores config enable` | Enable live score alerts (admin) |
+| `/scores config disable` | Disable live score alerts (admin) |
 
 ---
 
@@ -80,17 +114,23 @@ discord_bot/
 ├── bot.py                  Entry point — run this to start the bot
 ├── config.py               Loads and validates all environment variables
 ├── database/
-│   ├── models.py           SQLAlchemy ORM models (Birthday, ScheduleConfig)
+│   ├── models.py           SQLAlchemy ORM models (9 tables)
 │   └── db.py               Engine + session factory, init_db()
 ├── utils/
-│   ├── claude_client.py    Anthropic API wrapper (trivia, release blurbs, review summaries)
+│   ├── claude_client.py    Anthropic API wrapper (trivia, music blurbs, review summaries, movie pitches)
 │   ├── spotify_client.py   Spotify API wrapper (new release search + album lookup)
-│   └── pitchfork_client.py Pitchfork scraper (Best New Albums page)
+│   ├── pitchfork_client.py Pitchfork scraper (Best New Albums page)
+│   ├── ticketmaster_client.py  Ticketmaster Discovery API wrapper (upcoming events by city)
+│   ├── tmdb_client.py      TMDB API wrapper (Criterion Collection catalog)
+│   └── sports_client.py    ESPN public API wrapper (live playoff scoreboards)
 ├── cogs/
 │   ├── trivia.py           Sports trivia cog
 │   ├── music.py            Music releases cog
 │   ├── birthdays.py        Birthday cog
-│   └── album_reviews.py    Monthly Pitchfork album review cog
+│   ├── album_reviews.py    Monthly Pitchfork album review cog
+│   ├── concerts.py         Weekly concert alerts cog
+│   ├── movies.py           Monthly Criterion movie night cog
+│   └── sports_scores.py    Live playoff sports score cog
 ├── Dockerfile              Production container image
 ├── docker-compose.yml      Local dev — runs Postgres + bot together
 └── .env.example            Template for all required secrets
@@ -108,7 +148,7 @@ cd discord-bot
 cp .env.example .env
 ```
 
-Fill in all five values in `.env`:
+Fill in all values in `.env`:
 
 | Variable | Where to get it |
 |---|---|
@@ -117,6 +157,8 @@ Fill in all five values in `.env`:
 | `ANTHROPIC_API_KEY` | https://console.anthropic.com → API Keys |
 | `SPOTIFY_CLIENT_ID` | https://developer.spotify.com/dashboard → Create App |
 | `SPOTIFY_CLIENT_SECRET` | Same Spotify app dashboard |
+| `TICKETMASTER_API_KEY` | https://developer.ticketmaster.com → My Apps → Consumer Key |
+| `TMDB_API_KEY` | https://www.themoviedb.org/settings/api → API Read Access Token (v3) |
 | `DATABASE_URL` | Leave as `sqlite:///./discord_bot.db` for plain Python dev; `docker compose` overrides it automatically |
 
 ### 2. Discord Developer Portal setup
@@ -174,77 +216,6 @@ docker compose logs -f bot
 
 # Stop everything
 docker compose down
-```
-
----
-
-## Local dev workflows
-
-### Example 1 — Adding a new birthday and verifying the announcement
-
-This walks through registering a birthday and triggering the announcement manually to confirm it works without waiting until 9 AM.
-
-**Step 1** — Start the bot (either method above) and confirm it's online in Discord.
-
-**Step 2** — In your Discord server, run:
-```
-/birthday set 6 15
-```
-You should get an ephemeral reply: *"Birthday registered! I'll announce it on June 15."*
-
-**Step 3** — Verify it was saved. Open a Python shell in the project:
-```bash
-source .venv/bin/activate
-python3 -c "
-from database.db import SessionLocal
-from database.models import Birthday
-with SessionLocal() as s:
-    for b in s.query(Birthday).all():
-        print(b)
-"
-```
-You should see your birthday row printed.
-
-**Step 4** — Trigger the announcement manually without waiting for 9 AM. In the Python shell:
-```bash
-python3 -c "
-import asyncio, discord
-from bot import DiscordBot
-# Easier: just call _check_birthdays directly via the running bot's scheduler
-# or test the embed by running the cog in isolation.
-"
-```
-The easiest way during development is to temporarily set `DEV_GUILD_ID` in `.env`, which gives instant slash command sync so you can rapidly test config changes — then check `#general` after running `/birthday config time` to a time a minute from now.
-
----
-
-### Example 2 — Changing the trivia schedule and testing it
-
-This demonstrates how admin config commands interact with the scheduler.
-
-**Step 1** — Start the bot. Open your Discord server and run:
-```
-/trivia config channel #sports-chat
-/trivia config time 16:00
-```
-You should get confirmation messages. The APScheduler job for your guild is updated immediately in memory — no restart needed.
-
-**Step 2** — Test on-demand to make sure the Claude integration is working:
-```
-/trivia play
-```
-A trivia embed should appear in the channel within a few seconds. If it fails, check the bot's terminal output for errors (Claude API key missing, rate limit, etc.).
-
-**Step 3** — Verify the schedule was saved to the database:
-```bash
-source .venv/bin/activate
-python3 -c "
-from database.db import SessionLocal
-from database.models import ScheduleConfig
-with SessionLocal() as s:
-    for cfg in s.query(ScheduleConfig).all():
-        print(cfg)
-"
 ```
 
 ---
@@ -308,7 +279,9 @@ docker logs -f discord-bot
    ```bash
    docker logs -f discord-bot
    ```
-   Look for all four cogs loading and "Bot ready" at the end.
+   Look for all seven cogs loading and "Bot ready" at the end.
+
+6. **Initialize the Criterion catalog** — run `/movie setup` once in any Discord server after the bot is live. This fetches all Criterion films from TMDB and stores them in the database. Takes a few minutes on the first run.
 
 ---
 
@@ -356,6 +329,15 @@ docker run -d --restart=always --env-file .env --name discord-bot discord-bot
 - [ ] Copy Client ID → `SPOTIFY_CLIENT_ID`
 - [ ] Copy Client Secret → `SPOTIFY_CLIENT_SECRET`
 
+### Ticketmaster
+- [ ] Create account and app at https://developer.ticketmaster.com
+- [ ] Copy **Consumer Key** (not Consumer Secret) → `TICKETMASTER_API_KEY`
+
+### TMDB
+- [ ] Create account at https://www.themoviedb.org
+- [ ] Settings → API → request a v3 API key → `TMDB_API_KEY`
+- [ ] After bot is live, run `/movie setup` once to populate the Criterion catalog
+
 ### GCP — Cloud SQL
 - [ ] Create PostgreSQL instance (`db-f1-micro`)
 - [ ] Create database `discord_bot` and a user with a strong password
@@ -373,4 +355,7 @@ docker run -d --restart=always --env-file .env --name discord-bot discord-bot
 - [ ] `/trivia play` returns an embed
 - [ ] `/music releases` returns an embed
 - [ ] `/birthday set 1 1` confirms registration
-- [ ] `/album post` returns an embed with album, score, summary, and links
+- [ ] `/album post` returns an embed with album cover, summary, and Spotify link
+- [ ] `/concert check` posts alerts or reports "no new shows found"
+- [ ] `/movie setup` completes without error, then `/movie pick` posts a film
+- [ ] `/scores config enable` + `/scores config channel #ch` — verify setup (score alerts only fire during active playoffs)

@@ -5,19 +5,30 @@ SQLAlchemy ORM models. Each class maps to one database table.
 
 Tables
 ------
-birthdays          — One row per registered user birthday per guild.
-schedule_configs   — One row per (guild, feature) pair storing the channel,
-                     posting schedule, and content options for each bot feature.
-music_posts        — One row per release posted by the music feature. Used to
-                     prevent the same artist from being posted repeatedly.
-album_review_posts — One row per album review posted by the album review
-                     feature. Used to prevent the same album from being
-                     re-posted if the monthly job fires more than once.
+birthdays             — One row per registered user birthday per guild.
+schedule_configs      — One row per (guild, feature) pair storing the channel,
+                        posting schedule, and content options for each bot feature.
+music_posts           — One row per release posted by the music feature. Used to
+                        prevent the same artist from being posted repeatedly.
+album_review_posts    — One row per album review posted by the album review
+                        feature. Used to prevent the same album from being
+                        re-posted if the monthly job fires more than once.
+artist_watchlist      — Per-guild list of artists to monitor for concert alerts.
+concert_alerts_posted — Records each concert alert posted per guild, used to
+                        prevent the same event from being announced twice.
+criterion_films       — Global catalog of Criterion Collection films fetched
+                        from TMDB. Shared across all guilds.
+movie_night_picks     — Per-guild record of which Criterion films have been
+                        featured, so the rotation doesn't repeat films until
+                        all have been shown.
+live_game_states      — Per-guild tracking state for each in-progress playoff
+                        game. Stores current scores and the index of the last
+                        scoring play reported so polls are idempotent.
 """
 
 import json
 
-from sqlalchemy import BigInteger, Column, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase
 from datetime import datetime
 
@@ -80,18 +91,26 @@ class ScheduleConfig(Base):
 
     Feature identifiers
     -------------------
-    "trivia"   — daily sports trivia (default 4 pm ET)
-    "music"    — weekly new releases (default Monday 10 am ET)
-    "birthday" — daily birthday check (default 9 am ET)
+    "trivia"        — daily sports trivia (default 4 pm ET)
+    "music"         — weekly new releases (default Monday 10 am ET)
+    "birthday"      — daily birthday check (default 9 am ET)
+    "album_review"  — monthly Pitchfork Best New Album post (default 1st, 10 am ET)
+    "concerts"      — weekly concert alerts via Ticketmaster (default Monday 9 am ET)
+    "movies"        — monthly Criterion Collection movie night pick (default 1st, 7 pm ET)
+    "sports_scores" — continuous live playoff score polling (interval-based, not cron)
 
     Content options
     ---------------
     Stored as a JSON string in the `content_options` column and accessed through
     the @property pair below.
 
-    trivia:   {"sports": ["soccer", "baseball", "football", "hockey"]}
-    music:    {"genres": ["rock", "indie rock", "electronic"]}
-    birthday: {}   ← no content options, just scheduling / channel
+    trivia:        {"sports": ["soccer", "baseball", "football", "hockey"]}
+    music:         {"genres": ["rock", "indie rock", "electronic"]}
+    birthday:      {}   ← no content options, just scheduling / channel
+    album_review:  {"day_of_month": 1}
+    concerts:      {"cities": ["Toronto", "Montreal"]}
+    movies:        {"day_of_month": 1}
+    sports_scores: {"enabled": true, "enabled_sports": ["nfl", "nhl", "mlb", "soccer"]}
     """
 
     __tablename__ = "schedule_configs"
@@ -101,7 +120,7 @@ class ScheduleConfig(Base):
     # Which Discord server this config row belongs to.
     guild_id = Column(BigInteger, nullable=False, index=True)
 
-    # Which bot feature this row configures ("trivia", "music", "birthday").
+    # Which bot feature this row configures. See class docstring for identifiers.
     feature = Column(String(50), nullable=False)
 
     # ID of the Discord text channel where the feature posts its content.
@@ -215,4 +234,230 @@ class AlbumReviewPost(Base):
         return (
             f"<AlbumReviewPost guild={self.guild_id} artist={self.artist_name!r} "
             f"album={self.album_title!r} posted={self.posted_at}>"
+        )
+
+
+class ArtistWatchlist(Base):
+    """
+    Stores artists that a guild wants to monitor for upcoming concert alerts.
+
+    Artists can be added via three sources:
+      "seed"         — pre-loaded from the built-in seed list on first setup.
+      "manual"       — added explicitly by an admin via /concert add.
+      "new_releases" — auto-added when the music feature features that artist.
+
+    The unique constraint on (guild_id, artist_name) ensures that the same
+    artist never appears twice in a guild's watchlist regardless of source.
+    """
+
+    __tablename__ = "artist_watchlist"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this watchlist entry belongs to.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # Artist name as a string (not a Spotify ID — sourced from multiple places).
+    artist_name = Column(String(200), nullable=False)
+
+    # Where this entry came from: "seed", "manual", or "new_releases".
+    source = Column(String(50), nullable=False, default="manual")
+
+    # When this entry was added.
+    added_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Each artist can appear only once per guild.
+    __table_args__ = (
+        UniqueConstraint("guild_id", "artist_name", name="uq_guild_artist_watchlist"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ArtistWatchlist guild={self.guild_id} artist={self.artist_name!r} "
+            f"source={self.source!r}>"
+        )
+
+
+class ConcertAlertPosted(Base):
+    """
+    Records each concert alert embed posted per guild.
+
+    The Ticketmaster event ID is used as the deduplication key — if the weekly
+    check runs again before an event has passed, the event won't be re-posted.
+    """
+
+    __tablename__ = "concert_alerts_posted"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this alert was posted in.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # Ticketmaster's unique event identifier — used as the deduplication key.
+    ticketmaster_event_id = Column(String(100), nullable=False)
+
+    # Human-readable fields stored for reference.
+    artist_name = Column(String(200), nullable=False)
+    event_name = Column(String(300), nullable=False)
+    venue_name = Column(String(200), nullable=True)
+    city = Column(String(100), nullable=False)
+    event_date = Column(String(50), nullable=True)
+
+    # When this alert was posted (UTC).
+    posted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # Each Ticketmaster event is posted at most once per guild.
+    __table_args__ = (
+        UniqueConstraint("guild_id", "ticketmaster_event_id", name="uq_guild_tm_event"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ConcertAlertPosted guild={self.guild_id} event={self.ticketmaster_event_id!r} "
+            f"artist={self.artist_name!r}>"
+        )
+
+
+class CriterionFilm(Base):
+    """
+    Stores a single film from the Criterion Collection catalog.
+
+    This table is GLOBAL — there is no guild_id column. All guilds share the
+    same catalog fetched from TMDB. Per-guild pick history is tracked separately
+    in movie_night_picks.
+
+    The tmdb_id is used as the primary key (not autoincrement) because TMDB IDs
+    are stable and serve as natural identifiers for the catalog.
+    """
+
+    __tablename__ = "criterion_films"
+
+    # TMDB's stable numeric film ID — used as PK and FK in movie_night_picks.
+    tmdb_id = Column(Integer, primary_key=True, autoincrement=False)
+
+    # Film title as listed on TMDB.
+    title = Column(String(300), nullable=False)
+
+    # Four-digit release year, e.g. 1953. NULL if TMDB doesn't have a date.
+    year = Column(Integer, nullable=True)
+
+    # Director name from TMDB credits. NULL if credits were unavailable.
+    director = Column(String(200), nullable=True)
+
+    # Plot overview from TMDB, truncated to 1000 characters.
+    overview = Column(String(1000), nullable=True)
+
+    # Full URL to the movie poster image (TMDB image CDN), or NULL.
+    poster_url = Column(String(500), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<CriterionFilm tmdb_id={self.tmdb_id} title={self.title!r} "
+            f"year={self.year} director={self.director!r}>"
+        )
+
+
+class MovieNightPick(Base):
+    """
+    Records which Criterion films have been featured on movie night per guild.
+
+    Used to ensure the monthly rotation doesn't repeat a film until all films
+    have been shown. When no unwatched films remain, the cog clears this table
+    for the guild and starts the rotation over.
+
+    No unique constraint is intentional — if the history is reset, the same
+    film can appear again in future picks.
+    """
+
+    __tablename__ = "movie_night_picks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this pick belongs to.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # The TMDB ID of the film that was picked.
+    tmdb_id = Column(Integer, nullable=False)
+
+    # Film title at the time of the pick (denormalized for convenience).
+    movie_title = Column(String(300), nullable=False)
+
+    # When this film was picked (UTC).
+    picked_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"<MovieNightPick guild={self.guild_id} tmdb_id={self.tmdb_id} "
+            f"title={self.movie_title!r} picked={self.picked_at}>"
+        )
+
+
+class LiveGameState(Base):
+    """
+    Tracks the live state of an in-progress or recently finished playoff game
+    for a single guild.
+
+    Each row represents one game that the sports scores cog is monitoring. The
+    polling job uses this table to determine:
+      - Whether we have already announced this game starting.
+      - Which scoring plays have already been posted (via last_play_index).
+      - The last known score, so we can post a final if the game disappears
+        from the ESPN feed between polls without returning STATUS_FINAL.
+
+    Rows are never deleted automatically — status transitions from "in_progress"
+    to "final" mark the game as done. Old rows do not affect correctness because
+    the polling logic only acts on rows with status "in_progress".
+
+    guild_id + game_id is unique: the same ESPN event won't be inserted twice
+    for the same guild even if two poll ticks overlap.
+    """
+
+    __tablename__ = "live_game_states"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this game state belongs to.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # ESPN's stable event ID string (e.g. "401671793").
+    game_id = Column(String(50), nullable=False)
+
+    # Sport name: "nfl", "nhl", "mlb", or "soccer".
+    sport = Column(String(20), nullable=False)
+
+    # Team names snapshotted at game-start detection time.
+    home_team = Column(String(200), nullable=False, default="")
+    away_team = Column(String(200), nullable=False, default="")
+
+    # Current scores as of the most recent poll.
+    home_score = Column(Integer, nullable=False, default=0)
+    away_score = Column(Integer, nullable=False, default=0)
+
+    # Simplified status: "in_progress" or "final".
+    status = Column(String(50), nullable=False, default="in_progress")
+
+    # True once we have posted the "game starting" embed for this game.
+    start_announced = Column(Boolean, nullable=False, default=False)
+
+    # Index into the ESPN details array of the last scoring play we posted.
+    # Starts at -1 (no plays posted yet) and advances as plays are reported.
+    # We set it to len(scoring_plays)-1 at game-start time so we don't
+    # replay scoring plays that already happened before we detected the game.
+    last_play_index = Column(Integer, nullable=False, default=-1)
+
+    # When this row was last updated (UTC). Updated on every poll that touches
+    # this game's state.
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    # One game row per guild — prevents duplicate "game starting" embeds if
+    # two poll ticks fire simultaneously.
+    __table_args__ = (
+        UniqueConstraint("guild_id", "game_id", name="uq_guild_game"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<LiveGameState guild={self.guild_id} game={self.game_id!r} "
+            f"sport={self.sport!r} status={self.status!r} "
+            f"{self.away_team} {self.away_score}–{self.home_score} {self.home_team}>"
         )

@@ -18,6 +18,9 @@ describe_release(artist, title, genre)  → str
 summarize_pitchfork_review(artist, album, review_text)  → str
     Summarize a Pitchfork album review into 3–4 sentences for the
     monthly album review embed.
+
+summarize_criterion_film(title, director, year, overview)  → str
+    Write a 2–3 sentence movie night pitch for a Criterion Collection film.
 """
 
 import json
@@ -72,15 +75,25 @@ def generate_trivia_question(sports: list[str]) -> dict:
 
 Generate one hard multiple-choice trivia question about one of these sports: {sports_str}.
 
+ERA REQUIREMENT — this is critical: your questions must cover a wide spread of time periods.
+Randomly select one of these eras for this question:
+  - Pre-1970 (early history, founding era, rule changes)
+  - 1970s–1990s (classic era)
+  - 2000s–2010s (modern era)
+  - 2015–present (recent era)
+Do NOT default to the same era or the same tournament repeatedly. If you find yourself reaching for the same famous historical event (e.g. a specific World Cup, a single legendary season, or one iconic moment), stop and pick something different from another era or competition.
+
 The audience follows these sports closely, so avoid anything a casual fan would know. Good question topics include:
 - Specific records, statistics, or milestones (e.g. exact numbers, career totals, single-season marks)
-- Obscure historical facts (e.g. rule changes, founding moments, defunct teams)
+- Rule changes, founding moments, or defunct teams/leagues
 - Draft history, trades, and roster moves that serious followers would recall
 - Awards and honours beyond the most famous ones
 - Coaches, referees, or front-office figures rather than just star players
 - Unusual or lesser-known moments in playoff/championship history
+- Country-level or club-level records from any era
+- Recent transfer fees, contract details, or roster facts (for the 2015–present era)
 
-Avoid: championship winners of recent major tournaments, MVP winners of the last decade, currently active superstars' well-known achievements, or any question a casual viewer could guess.
+Avoid: the very most famous moments every casual fan knows (e.g. the Miracle on Ice, Brazil 1970, etc.), or questions that require no specialized knowledge.
 
 Return ONLY a valid JSON object — no markdown fences, no explanation text — with this exact structure:
 {{
@@ -204,6 +217,52 @@ Return only the summary text — no labels, no preamble, no quotation marks."""
     response = _client.messages.create(
         model=_MODEL,
         max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return response.content[0].text.strip()
+
+
+def summarize_criterion_film(
+    title: str, director: str, year: int, overview: str
+) -> str:
+    """
+    Ask Claude to write a short, enthusiastic pitch for a Criterion Collection
+    film to post in the Discord movie night channel.
+
+    The pitch is written in Claude's own voice, drawing on the TMDB overview.
+    It should feel like a recommendation from a knowledgeable friend rather than
+    a formal synopsis, and should make the group want to watch the film.
+
+    Parameters
+    ----------
+    title    : Film title.
+    director : Director's name.
+    year     : Four-digit release year.
+    overview : TMDB plot overview (may be truncated).
+
+    Returns
+    -------
+    str
+        A 2–3 sentence pitch, casual and enthusiastic, ready to embed in Discord.
+    """
+    prompt = f"""You are writing a short movie night pitch for a Discord bot.
+
+Below is a Criterion Collection film pick. Write 2–3 sentences in your own words that make
+your friends excited to watch it — mention what makes it special, its mood or style, and
+why it's worth their time. Keep it casual, enthusiastic, and specific. No plot spoilers.
+
+Film: {title} ({year})
+Director: {director}
+
+Overview:
+{overview}
+
+Return only the pitch text — no labels, no preamble, no quotation marks."""
+
+    response = _client.messages.create(
+        model=_MODEL,
+        max_tokens=200,
         messages=[{"role": "user", "content": prompt}],
     )
 

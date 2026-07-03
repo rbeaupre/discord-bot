@@ -28,13 +28,15 @@ Default schedule: every Monday at 10:00 AM Eastern Time in #new_releases.
 import logging
 from datetime import datetime, timedelta
 
+from sqlalchemy.exc import IntegrityError
+
 import discord
 from apscheduler.triggers.cron import CronTrigger
 from discord import app_commands
 from discord.ext import commands
 
 from database.db import SessionLocal
-from database.models import MusicPost, ScheduleConfig
+from database.models import ArtistWatchlist, MusicPost, ScheduleConfig
 from utils.claude_client import describe_release
 from utils.spotify_client import get_new_releases
 
@@ -477,18 +479,39 @@ class MusicCog(commands.Cog, name="Music"):
         Write a MusicPost row for each release that was just posted.
         These rows are read back on the next post to exclude the same artists,
         preventing the weekly releases from repeating the same acts indefinitely.
+
+        Also auto-adds each artist to the concert watchlist (artist_watchlist)
+        with source="new_releases" if they aren't already present. This means
+        any artist featured in the music post will automatically be watched for
+        upcoming concert alerts without admin intervention.
         """
         with SessionLocal() as session:
             for release in releases:
                 artist_id = release.get("artist_id")
                 if not artist_id:
                     continue
+
                 session.add(MusicPost(
                     guild_id=guild_id,
                     artist_id=artist_id,
                     artist_name=release.get("artist", "Unknown"),
                     release_title=release.get("title", "Unknown"),
                 ))
+
+                # Auto-add to concert watchlist. IntegrityError means the artist
+                # is already watching — skip silently without failing the whole commit.
+                artist_name = release.get("artist", "")
+                if artist_name:
+                    try:
+                        session.add(ArtistWatchlist(
+                            guild_id=guild_id,
+                            artist_name=artist_name,
+                            source="new_releases",
+                        ))
+                        session.flush()
+                    except IntegrityError:
+                        session.rollback()
+
             session.commit()
 
         logger.debug(

@@ -51,6 +51,14 @@ ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
 SPOTIFY_CLIENT_ID: str = _require("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET: str = _require("SPOTIFY_CLIENT_SECRET")
 
+# ─── Ticketmaster ─────────────────────────────────────────────────────────────
+
+TICKETMASTER_API_KEY: str = _require("TICKETMASTER_API_KEY")
+
+# ─── TMDB (The Movie Database) ────────────────────────────────────────────────
+
+TMDB_API_KEY: str = _require("TMDB_API_KEY")
+
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 DATABASE_URL: str = _require("DATABASE_URL")

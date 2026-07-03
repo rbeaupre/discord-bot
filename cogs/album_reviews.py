@@ -20,7 +20,7 @@ How it works
 
 Slash commands
 ──────────────
-/album post                    — Post the latest Pitchfork Best New Album now (any member)
+/album post                    — Post the latest Pitchfork Best New Album now (admin)
 /album config channel <#ch>    — Set the posting channel (admin)
 /album config day     <1–31>   — Set which day of the month to post (admin)
 /album config time    <HH:MM>  — Set posting time in ET (admin)
@@ -29,7 +29,7 @@ Default schedule: 1st of every month at 10:00 AM Eastern Time in #album-reviews.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import discord
 from apscheduler.triggers.cron import CronTrigger
@@ -252,7 +252,7 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
             url=pitchfork_url,
             description=f"Pitchfork Best New Album\n\n{summary}{spotify_line}",
             color=discord.Color.orange(),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
 
         # Show artist name in the author line above the title.
