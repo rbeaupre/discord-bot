@@ -66,15 +66,15 @@ def _get_oauth_client() -> spotipy.Spotify:
     """
     Return the OAuth-authenticated Spotipy client, creating it on first call.
 
-    Reads the cached token from SPOTIFY_CACHE_PATH. If the cache is missing,
-    raises ValueError with instructions — the caller surfaces this to the user.
-    Spotipy auto-refreshes the access token using the stored refresh token, so
-    the cache file only needs to be generated once (via auth_spotify.py).
+    Validates the cache file before passing it to Spotipy. Without this check,
+    a missing or empty cache causes Spotipy to attempt interactive terminal auth,
+    which hangs (EOFError) inside a headless Docker container.
 
     Raises
     ------
     ValueError
-        If the cache file does not exist.
+        If the cache file is missing, is a directory, contains invalid JSON,
+        or is missing the refresh_token key.
     spotipy.oauth2.SpotifyOauthError
         If the cached refresh token has been revoked and cannot be refreshed.
     """
@@ -83,13 +83,30 @@ def _get_oauth_client() -> spotipy.Spotify:
         return _sp_user
 
     cache_path = config.SPOTIFY_CACHE_PATH
-    if not os.path.exists(cache_path):
+
+    # A missing path OR a directory (Docker creates a dir when the host path
+    # doesn't exist at container start) are both unusable as a cache file.
+    if not os.path.exists(cache_path) or os.path.isdir(cache_path):
         raise ValueError(
             f"Spotify OAuth cache not found at {cache_path!r}. "
-            "Run auth_spotify.py locally to authenticate, then copy the cache "
-            f"file to the server at {cache_path}. "
-            "See the README for setup instructions."
+            "Run auth_spotify.py locally to generate it, then copy it to the "
+            f"server at {cache_path} and restart the bot container."
         )
+
+    # Validate the cache contains a refresh token before handing it to Spotipy.
+    # An empty or malformed file causes the same headless EOFError as no file.
+    import json as _json
+    try:
+        with open(cache_path) as f:
+            cached = _json.load(f)
+        if not cached.get("refresh_token"):
+            raise ValueError("refresh_token key is missing from the cache.")
+    except (_json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(
+            f"Spotify OAuth cache at {cache_path!r} is invalid or missing a "
+            "refresh_token. Re-run auth_spotify.py locally and copy the new "
+            "cache file to the server."
+        ) from exc
 
     _sp_user = spotipy.Spotify(
         auth_manager=SpotifyOAuth(
