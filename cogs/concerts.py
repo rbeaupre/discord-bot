@@ -7,26 +7,28 @@ the configured channel.
 
 How it works
 ────────────
-1. On bot connect (on_ready), seeds the artist watchlist for each guild from
-   _SEED_ARTISTS if no watchlist rows exist yet, then registers one APScheduler
-   CronJob per guild (default Monday 9 AM ET).
+1. On bot connect (on_ready), registers one APScheduler CronJob per guild
+   (default Monday 9 AM ET).
 2. When the job fires, it fetches all upcoming music events in the configured
    cities from Ticketmaster and matches artist names against the watchlist using
    case-insensitive comparison.
 3. For each matched event not already in concert_alerts_posted for this guild,
    a Discord embed with event details and a ticket link is posted.
-4. New artists from the weekly music release feature are auto-added to the
+4. The watchlist starts empty. Use /concert import with a Spotify playlist URL
+   to bulk-populate it, or /concert add to add artists one at a time.
+5. New artists from the weekly music release feature are auto-added to the
    watchlist by cogs/music.py with source="new_releases".
 
 Slash commands
 ──────────────
-/concert add <artist>          — Add artist to watchlist (admin)
-/concert remove <artist>       — Remove artist from watchlist (admin)
-/concert list                  — Show first 20 watchlist artists (anyone)
-/concert check                 — Run the concert check right now (admin)
-/concert config channel <#ch>  — Set the alert channel (admin)
-/concert config day <weekday>  — Set check day of week (admin)
-/concert config time <HH:MM>   — Set check time in ET (admin)
+/concert add <artist>              — Add artist to watchlist (admin)
+/concert remove <artist>           — Remove artist from watchlist (admin)
+/concert list                      — Show first 20 watchlist artists (anyone)
+/concert check                     — Run the concert check right now (admin)
+/concert import <playlist_url>     — Bulk-add all artists from a Spotify playlist (admin)
+/concert config channel <#ch>      — Set the alert channel (admin)
+/concert config day <weekday>      — Set check day of week (admin)
+/concert config time <HH:MM>       — Set check time in ET (admin)
 
 Default schedule: every Monday at 9:00 AM Eastern Time in #concert-alerts.
 Default cities: Toronto, Montreal.
@@ -41,9 +43,12 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy.exc import IntegrityError
 
+import spotipy
+
 import config
 from database.db import SessionLocal
 from database.models import ArtistWatchlist, ConcertAlertPosted, ScheduleConfig
+from utils.spotify_client import get_playlist_artists
 from utils.ticketmaster_client import TicketmasterError, get_upcoming_events
 
 logger = logging.getLogger(__name__)
@@ -56,77 +61,6 @@ _DEFAULT_DAY = "mon"
 _DEFAULT_CITIES = ["Toronto", "Montreal"]
 _DEFAULT_CHANNEL_NAME = "concert-alerts"
 _VALID_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-
-# ── Seed artist list ──────────────────────────────────────────────────────────
-# Pre-loaded into every guild's watchlist on first setup. Focused on indie
-# rock, alternative, experimental electronic, and club music — the genres
-# most likely to be touring through Toronto and Montreal.
-_SEED_ARTISTS: list[str] = [
-    # Rock / Indie — guitar bands, singer-songwriters, post-punk, shoegaze
-    "Arctic Monkeys", "Radiohead", "The National", "Tame Impala",
-    "Vampire Weekend", "Arcade Fire", "LCD Soundsystem", "Bon Iver",
-    "Fleet Foxes", "Sufjan Stevens", "Phoebe Bridgers", "boygenius",
-    "Japanese Breakfast", "Big Thief", "Snail Mail", "Soccer Mommy",
-    "Angel Olsen", "Car Seat Headrest", "Parquet Courts", "Courtney Barnett",
-    "King Krule", "Idles", "Fontaines D.C.", "Wet Leg", "The War on Drugs",
-    "Yo La Tengo", "Pavement", "Built to Spill", "Modest Mouse", "The Shins",
-    "Death Cab for Cutie", "Bright Eyes", "Jenny Lewis", "Julien Baker",
-    "Lucy Dacus", "Clairo", "Weyes Blood", "Caroline Polachek", "Mitski",
-    "Waxahatchee", "Beach House", "Real Estate", "Alex G", "Pinegrove",
-    "Wednesday", "Lomelda", "Bellows", "Florist", "Hand Habits", "Hovvdy",
-    "illuminati hotties", "Men I Trust", "Tops", "Helena Deland",
-    # Indie / Alternative — classic and influential
-    "Neutral Milk Hotel", "Guided by Voices", "Sebadoh", "Dinosaur Jr.",
-    "Wilco", "Silver Jews", "Smog", "The Mountain Goats", "Okkervil River",
-    "Nada Surf", "Grandaddy", "Sparklehorse", "Elliott Smith",
-    "My Bloody Valentine", "Slowdive", "Ride", "Cocteau Twins", "Mazzy Star",
-    "Low", "Galaxie 500", "Codeine", "American Football", "Mineral",
-    "Sunny Day Real Estate", "The Promise Ring", "Braid", "Cap'n Jazz",
-    "Interpol", "Spoon", "The Walkmen", "Clap Your Hands Say Yeah",
-    "TV on the Radio", "Grizzly Bear", "Animal Collective", "Deerhunter",
-    "Dirty Projectors", "Beirut", "The Decemberists", "Of Montreal",
-    # Indie / Alternative — current wave
-    "Yard Act", "Shame", "Squid", "black midi", "Dry Cleaning",
-    "Sleaford Mods", "BC Camplight", "Porridge Radio", "Tirzah",
-    "Osees", "Ty Segall", "Mdou Moctar", "Khruangbin", "Steve Gunn",
-    "Rolling Blackouts Coastal Fever", "Julia Jacklin", "Camp Cope",
-    "Hop Along", "Frankie Cosmos", "Girlpool", "Squirrel Flower",
-    "Indigo De Souza", "Samia", "Faye Webster", "Bonny Light Horseman",
-    "Allison Russell", "Adrianne Lenker", "Sharon Van Etten", "Hand Habits",
-    "Nick Cave and the Bad Seeds", "PJ Harvey", "St. Vincent", "Bill Callahan",
-    # Brit-pop / UK Indie
-    "Blur", "Oasis", "Pulp", "Suede", "Elastica", "Primal Scream",
-    "Teenage Fanclub", "The La's", "Gene", "Cast", "Supergrass",
-    # Electronic — IDM, ambient, experimental
-    "Aphex Twin", "Autechre", "Boards of Canada", "Squarepusher", "Plaid",
-    "μ-Ziq", "Clark", "Amon Tobin", "Venetian Snares", "Prefuse 73",
-    "Bibio", "Gold Panda", "Shackleton", "Actress", "Andy Stott",
-    "Demdike Stare", "Tim Hecker", "William Basinski", "Stars of the Lid",
-    "Grouper", "Fennesz", "Oval", "Ryoji Ikeda", "Alva Noto",
-    "Forest Swords", "The Haxan Cloak", "Raime", "Emptyset", "Helm",
-    # Electronic — dance, club, trip-hop
-    "Daft Punk", "Justice", "Chemical Brothers", "Burial", "Four Tet",
-    "Caribou", "Floating Points", "Bicep", "Fred again..", "Overmono",
-    "Massive Attack", "Portishead", "Tricky", "The xx", "Jamie xx",
-    "Bonobo", "Nicolas Jaar", "Jon Hopkins", "Moderat", "SOPHIE",
-    "Arca", "Robyn", "Röyksopp", "Air", "Stereolab", "Broadcast",
-    "Trentemøller", "James Blake", "FKA twigs", "Kelela", "Kaytranada",
-    "Sault", "Washed Out", "Jlin", "Amnesia Scanner", "Tirzah",
-    "KODE9", "Cooly G", "Mumdance", "Skee Mask", "Call Super",
-    # Techno / Deep House / Club
-    "Jeff Mills", "Carl Craig", "Robert Hood", "Juan Atkins",
-    "Kevin Saunderson", "Derrick May", "Model 500", "Underground Resistance",
-    "Richie Hawtin", "Ben Klock", "Marcel Dettmann", "Surgeon",
-    "Blawan", "Andy Stott", "DVS1", "Len Faki",
-    "Ben UFO", "Pearson Sound", "Tessela", "Pariah",
-    "Objekt", "Move D", "Hunee", "Young Marco",
-    "Donato Dozzy", "Voices from the Lake", "Vatican Shadow", "Basic Channel",
-    "Larry Heard", "Frankie Knuckles", "Kerri Chandler", "Moodymann",
-    "Theo Parrish", "DJ Sprinkles", "DJ Harvey", "Todd Terje",
-    "Optimo", "Jennifer Cardini", "Levon Vincent", "KiNK",
-    "DJ Stingray", "Peggy Gou", "Daniel Avery", "Dj Koze",
-]
-
 
 def _job_id(guild_id: int) -> str:
     """Return the stable APScheduler job ID for a guild's concert check job."""
@@ -145,7 +79,7 @@ class ConcertsCog(commands.Cog, name="Concerts"):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        """Seed watchlists and register a concert check job for every guild."""
+        """Register a concert check job for every guild the bot is in."""
         for guild in self.bot.guilds:
             await self._schedule_for_guild(guild.id)
         logger.info(
@@ -154,11 +88,12 @@ class ConcertsCog(commands.Cog, name="Concerts"):
 
     async def _schedule_for_guild(self, guild_id: int) -> None:
         """
-        Load this guild's concert config, seed the artist watchlist if it is
-        empty, and (re)register the APScheduler weekly check job.
+        Load this guild's concert config and (re)register the APScheduler
+        weekly check job.
 
-        Seeding on every call is safe because the seed only runs when the
-        watchlist count is zero — subsequent calls skip it in one DB query.
+        Safe to call multiple times — APScheduler replaces the existing job
+        in place when replace_existing=True, so this can be called on reconnect
+        or after any config change without creating duplicate jobs.
         """
         with SessionLocal() as session:
             cfg = (
@@ -186,17 +121,6 @@ class ConcertsCog(commands.Cog, name="Concerts"):
             tz = cfg.timezone
             day = cfg.day_of_week or _DEFAULT_DAY
 
-            # A single COUNT query is much cheaper than loading all rows on
-            # every bot restart just to check whether seeding is needed.
-            watchlist_count = (
-                session.query(ArtistWatchlist)
-                .filter_by(guild_id=guild_id)
-                .count()
-            )
-
-        if watchlist_count == 0:
-            await self._seed_watchlist(guild_id)
-
         self.bot.scheduler.add_job(
             self._check_concerts,
             CronTrigger(day_of_week=day, hour=hour, minute=minute, timezone=tz),
@@ -207,39 +131,6 @@ class ConcertsCog(commands.Cog, name="Concerts"):
         logger.debug(
             "Concert check job set for guild %d — %s at %02d:%02d %s",
             guild_id, day, hour, minute, tz,
-        )
-
-    async def _seed_watchlist(self, guild_id: int) -> None:
-        """
-        Bulk-insert all artists from _SEED_ARTISTS into this guild's watchlist.
-
-        Uses per-row IntegrityError handling so a partial seed (e.g. from a
-        crash mid-run) can be safely resumed — already-inserted rows are just
-        skipped. This is less efficient than a single bulk insert but avoids
-        any risk of leaving the watchlist in a broken state.
-        """
-        logger.info(
-            "Seeding %d artists into watchlist for guild %d",
-            len(_SEED_ARTISTS), guild_id,
-        )
-        inserted = 0
-        with SessionLocal() as session:
-            for name in _SEED_ARTISTS:
-                try:
-                    session.add(ArtistWatchlist(
-                        guild_id=guild_id,
-                        artist_name=name,
-                        source="seed",
-                    ))
-                    session.flush()
-                    inserted += 1
-                except IntegrityError:
-                    # Artist already present — skip and continue.
-                    session.rollback()
-            session.commit()
-
-        logger.info(
-            "Watchlist seeded for guild %d: %d artists inserted", guild_id, inserted
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -545,6 +436,81 @@ class ConcertsCog(commands.Cog, name="Concerts"):
         await interaction.response.defer(thinking=True)
         await self._check_concerts(interaction.guild_id)
         await interaction.followup.send("Concert check complete!", ephemeral=True)
+
+    @concert_group.command(
+        name="import",
+        description="Import all artists from a public Spotify playlist into the watchlist (admin only)",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(
+        playlist_url="Spotify playlist URL from the Share menu "
+                     "(open.spotify.com/playlist/...)"
+    )
+    async def concert_import(
+        self, interaction: discord.Interaction, playlist_url: str
+    ) -> None:
+        """
+        Admin: Bulk-add every unique artist from a public Spotify playlist to
+        this guild's concert watchlist.
+
+        Useful for seeding the watchlist from a curated playlist without having
+        to add artists one by one. Artists already in the watchlist are silently
+        skipped. The playlist must be public — private playlists return a 403.
+        """
+        await interaction.response.defer(thinking=True)
+
+        # Fetch all unique artist names from the playlist.
+        try:
+            artist_names = get_playlist_artists(playlist_url)
+        except ValueError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except spotipy.SpotifyException as exc:
+            await interaction.followup.send(
+                f"Spotify error — make sure the playlist is public.\n`{exc}`",
+                ephemeral=True,
+            )
+            return
+
+        if not artist_names:
+            await interaction.followup.send(
+                "No artists found in that playlist.", ephemeral=True
+            )
+            return
+
+        # Bulk-insert, skipping any artist already in the watchlist (case-insensitive).
+        added = 0
+        skipped = 0
+        with SessionLocal() as session:
+            for name in artist_names:
+                existing = (
+                    session.query(ArtistWatchlist)
+                    .filter(
+                        ArtistWatchlist.guild_id == interaction.guild_id,
+                        ArtistWatchlist.artist_name.ilike(name),
+                    )
+                    .first()
+                )
+                if existing:
+                    skipped += 1
+                    continue
+                session.add(ArtistWatchlist(
+                    guild_id=interaction.guild_id,
+                    artist_name=name,
+                    source="manual",
+                ))
+                added += 1
+            session.commit()
+
+        logger.info(
+            "Playlist import for guild %d: %d artists added, %d already in watchlist",
+            interaction.guild_id, added, skipped,
+        )
+        await interaction.followup.send(
+            f"Done — **{added}** new artists added to the watchlist "
+            f"({skipped} already present).",
+            ephemeral=True,
+        )
 
     # ── Admin config subgroup: /concert config ────────────────────────────────
 

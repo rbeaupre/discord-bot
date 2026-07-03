@@ -37,7 +37,7 @@ A Discord bot for a private server with seven features: sports trivia, weekly ne
 
 **`album_review_posts`** — one row per Pitchfork review posted per server. The Pitchfork URL is used as the deduplication key so the same album is never posted twice even if the monthly job fires more than once before Pitchfork publishes a new Best New Album.
 
-**`artist_watchlist`** — per-guild list of artists to monitor for concert alerts. Seeded with ~200 artists on first setup. New artists are auto-added when they appear in the weekly music releases post. Admins can add/remove artists manually via `/concert add` and `/concert remove`.
+**`artist_watchlist`** — per-guild list of artists to monitor for concert alerts. Populate it using `/concert import <playlist_url>` with a public Spotify playlist, or add artists one at a time with `/concert add`. New artists from the weekly music releases post are also auto-added with source="new_releases".
 
 **`concert_alerts_posted`** — one row per Ticketmaster event per server. Used to prevent the same show from being posted twice across consecutive weekly checks.
 
@@ -102,8 +102,8 @@ All `/config` subcommands require Manage Server permissions. Changes are live im
 | `/scores status` | Show current score alert config |
 | `/scores config channel #ch` | Set the score alerts channel (admin) |
 | `/scores config sports` | Toggle individual sports on/off (admin) |
-| `/scores config enable` | Enable live score alerts (admin) |
-| `/scores config disable` | Disable live score alerts (admin) |
+| `/scores config enable` | Enable live score alerts |
+| `/scores config disable` | Disable live score alerts |
 
 ---
 

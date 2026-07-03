@@ -1,10 +1,12 @@
 """
 utils/spotify_client.py
 ───────────────────────
-Wrapper around the Spotipy library for fetching new music releases.
+Wrapper around the Spotipy library for fetching new music releases and
+reading public playlist data.
 
 Uses Spotify's Client Credentials flow — no user login or OAuth callback
-required — which is appropriate for reading public catalog data like albums.
+required — which is appropriate for reading public catalog data like albums
+and playlists.
 
 Spotify API restrictions (as of 2026 for new app registrations)
 ---------------------------------------------------------------
@@ -14,6 +16,7 @@ The following endpoints return 403 Forbidden for apps without extended access:
 
 What DOES work:
   - GET /v1/search with type=track, limit<=10
+  - GET /v1/playlists/{id}/tracks (public playlists only)
 
 Strategy
 --------
@@ -33,9 +36,11 @@ Public functions
 ----------------
 get_new_releases(genres, exclude_artist_ids, max_popularity)  → list[dict]
 find_album_url(artist, album)                                  → str | None
+get_playlist_artists(playlist_url)                             → list[str]
 """
 
 import logging
+import re
 from datetime import datetime
 
 import spotipy
@@ -262,3 +267,85 @@ def find_album_url(artist: str, album: str) -> str | None:
             continue
 
     return None
+
+
+def get_playlist_artists(playlist_url: str) -> list[str]:
+    """
+    Return a deduplicated list of unique artist names from a public Spotify playlist.
+
+    Paginates through all tracks in the playlist (100 per page) and collects
+    every credited artist. Deduplication is case-insensitive but the first-seen
+    capitalisation is preserved in the returned list.
+
+    Parameters
+    ----------
+    playlist_url : Full Spotify playlist URL
+                   (e.g. https://open.spotify.com/playlist/37i9dQZF1DX...)
+                   or a Spotify URI (spotify:playlist:37i9dQZF1DX...).
+
+    Returns
+    -------
+    list[str]
+        Unique artist names in the order they first appear in the playlist.
+
+    Raises
+    ------
+    ValueError
+        If no playlist ID can be extracted from playlist_url.
+    spotipy.SpotifyException
+        If the playlist is private, doesn't exist, or the API request fails.
+    """
+    # Extract the 22-character playlist ID from a URL or URI.
+    # URL: https://open.spotify.com/playlist/<id>?si=...
+    # URI: spotify:playlist:<id>
+    match = re.search(r"playlist[/:]([A-Za-z0-9]+)", playlist_url)
+    if not match:
+        raise ValueError(
+            f"Could not extract a playlist ID from {playlist_url!r}. "
+            "Use a link from the Spotify 'Share' menu."
+        )
+
+    playlist_id = match.group(1)
+    logger.info("Fetching artists from Spotify playlist %s", playlist_id)
+
+    # Only fetch the fields we need to minimise response size.
+    fields = "items(track(artists(name))),next"
+
+    seen_lower: set[str] = set()
+    artists: list[str] = []
+    offset = 0
+    limit = 100
+
+    while True:
+        try:
+            result = _sp.playlist_items(
+                playlist_id,
+                fields=fields,
+                limit=limit,
+                offset=offset,
+                additional_types=["track"],
+            )
+        except spotipy.SpotifyException as exc:
+            raise spotipy.SpotifyException(
+                f"Spotify playlist fetch failed: {exc}"
+            ) from exc
+
+        for item in result.get("items", []):
+            track = item.get("track")
+            if not track:
+                # Local files or podcast episodes have no track object.
+                continue
+            for artist in track.get("artists", []):
+                name = (artist.get("name") or "").strip()
+                if name and name.lower() not in seen_lower:
+                    seen_lower.add(name.lower())
+                    artists.append(name)
+
+        if not result.get("next"):
+            break
+        offset += limit
+
+    logger.info(
+        "Found %d unique artists in playlist %s", len(artists), playlist_id
+    )
+    return artists

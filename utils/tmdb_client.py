@@ -47,11 +47,19 @@ def _get(path: str, api_key: str, **params) -> dict:
     """
     Make a GET request to the TMDB API and return the parsed JSON body.
 
+    TMDB supports two authentication formats:
+      - v3 API key (short alphanumeric string): passed as ?api_key= query param.
+      - API Read Access Token (JWT starting with "eyJ"): passed as an
+        Authorization: Bearer header. This is what the TMDB dashboard calls
+        "API Read Access Token" and is the default for new accounts.
+
+    Both token types work with the v3 API endpoints — only the auth method differs.
+
     Parameters
     ----------
     path    : API path relative to _BASE_URL, e.g. "/search/company".
-    api_key : TMDB v3 API key.
-    **params: Additional query parameters merged with the API key.
+    api_key : Either a v3 API key or a JWT Bearer token from the TMDB dashboard.
+    **params: Additional query parameters.
 
     Raises
     ------
@@ -59,10 +67,20 @@ def _get(path: str, api_key: str, **params) -> dict:
         On any network error or non-2xx HTTP status.
     """
     url = _BASE_URL + path
+
+    # JWTs start with "eyJ" (base64-encoded '{"'). Detect and use Bearer auth.
+    if api_key.startswith("eyJ"):
+        headers = {"Authorization": f"Bearer {api_key}"}
+        query_params = params
+    else:
+        headers = {}
+        query_params = {"api_key": api_key, **params}
+
     try:
         response = requests.get(
             url,
-            params={"api_key": api_key, **params},
+            params=query_params,
+            headers=headers,
             timeout=_REQUEST_TIMEOUT,
         )
         response.raise_for_status()

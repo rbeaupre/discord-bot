@@ -23,8 +23,8 @@ Slash commands
 /scores config channel <#ch>          — Set the alert channel (admin)
 /scores config sports [nfl] [nhl] [mlb] [soccer]
                                       — Toggle sports on or off (admin)
-/scores config enable                 — Enable the feature (admin)
-/scores config disable                — Disable the feature (admin)
+/scores config enable                 — Enable the feature (anyone)
+/scores config disable                — Disable the feature (anyone)
 
 Default: enabled, all four sports, channel name "sports-updates".
 """
@@ -665,20 +665,18 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
 
     @scores_config.command(
         name="enable",
-        description="Enable live score alerts for this server (admin only)",
+        description="Enable live score alerts for this server",
     )
-    @app_commands.checks.has_permissions(manage_guild=True)
     async def scores_config_enable(self, interaction: discord.Interaction) -> None:
-        """Admin: Turn on the live score alerts feature for this guild."""
+        """Turn on the live score alerts feature for this guild."""
         await self._set_enabled(interaction, True)
 
     @scores_config.command(
         name="disable",
-        description="Disable live score alerts for this server (admin only)",
+        description="Disable live score alerts for this server",
     )
-    @app_commands.checks.has_permissions(manage_guild=True)
     async def scores_config_disable(self, interaction: discord.Interaction) -> None:
-        """Admin: Turn off the live score alerts feature for this guild."""
+        """Turn off the live score alerts feature for this guild."""
         await self._set_enabled(interaction, False)
 
     async def _set_enabled(
