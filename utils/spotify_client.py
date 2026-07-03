@@ -6,7 +6,7 @@ reading public playlist data.
 
 Uses Spotify's Client Credentials flow — no user login or OAuth callback
 required — which is appropriate for reading public catalog data like albums
-and playlists.
+and track search results.
 
 Spotify API restrictions (as of 2026 for new app registrations)
 ---------------------------------------------------------------
@@ -14,9 +14,13 @@ The following endpoints return 403 Forbidden for apps without extended access:
   - GET /v1/browse/new-releases
   - GET /v1/artists (batch artist lookup — no genre tags or artist popularity)
 
-What DOES work:
+The following endpoints return 401 and require user OAuth (not just Client
+Credentials), even for public playlists, on newer app registrations:
+  - GET /v1/playlists/{id}/items
+
+What DOES work with Client Credentials:
   - GET /v1/search with type=track, limit<=10
-  - GET /v1/playlists/{id}/tracks (public playlists only)
+  - GET /v1/search with type=album, limit<=1
 
 Strategy
 --------
@@ -325,10 +329,8 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
                 offset=offset,
                 additional_types=["track"],
             )
-        except spotipy.SpotifyException as exc:
-            raise spotipy.SpotifyException(
-                f"Spotify playlist fetch failed: {exc}"
-            ) from exc
+        except spotipy.SpotifyException:
+            raise
 
         for item in result.get("items", []):
             track = item.get("track")

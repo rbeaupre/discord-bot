@@ -466,10 +466,21 @@ class ConcertsCog(commands.Cog, name="Concerts"):
             await interaction.followup.send(str(exc), ephemeral=True)
             return
         except spotipy.SpotifyException as exc:
-            await interaction.followup.send(
-                f"Spotify error — make sure the playlist is public.\n`{exc}`",
-                ephemeral=True,
-            )
+            # 401 here almost always means the playlist_items endpoint requires
+            # user OAuth, which Client Credentials does not provide. Newer Spotify
+            # app registrations hit this restriction even on public playlists.
+            if getattr(exc, "http_status", None) == 401:
+                await interaction.followup.send(
+                    "Spotify returned 401 — the playlist items endpoint now requires "
+                    "user authentication, which this bot's Spotify app does not have. "
+                    "As a workaround, use `/concert add <artist>` to add artists manually.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"Spotify error — make sure the playlist is public.\n`{exc}`",
+                    ephemeral=True,
+                )
             return
 
         if not artist_names:
