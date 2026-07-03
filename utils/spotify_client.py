@@ -377,9 +377,6 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
     # on newer Spotify app registrations.
     sp = _get_oauth_client()
 
-    # Only fetch the fields we need to minimise response size.
-    fields = "items(track(artists(name))),next"
-
     seen_lower: set[str] = set()
     artists: list[str] = []
     offset = 0
@@ -387,12 +384,13 @@ def get_playlist_artists(playlist_url: str) -> list[str]:
 
     while True:
         try:
+            # No fields filter — Spotify can return track=null for all items
+            # when the filter interacts with certain playlist item types, even
+            # when the playlist contains normal tracks. Fetch full objects instead.
             result = sp.playlist_items(
                 playlist_id,
-                fields=fields,
                 limit=limit,
                 offset=offset,
-                additional_types=["track"],
             )
         except spotipy.SpotifyException:
             raise
