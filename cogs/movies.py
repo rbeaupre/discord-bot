@@ -7,15 +7,16 @@ with the movie poster.
 
 How it works
 ────────────
-1. An admin runs /movie setup once to populate the global criterion_films table
-   from TMDB. This fetches all Criterion films with director credits and stores
-   them in the database so subsequent picks are instant (no API call needed).
-2. A per-guild movie_night_picks table tracks which films have been selected,
+1. On the configured day each month (default: 1st at 7 PM ET), the scheduled
+   job first syncs the Criterion catalog from TMDB to pick up any newly added
+   films, then picks a random unwatched film, asks Claude to write a short
+   pitch, and posts an embed with the movie poster.
+2. The TMDB sync is incremental — it only fetches /credits for films not
+   already in the database, so monthly refreshes are fast. /movie setup can
+   still be used to force an immediate refresh on demand.
+3. A per-guild movie_night_picks table tracks which films have been selected,
    so the same film is never repeated until every film in the catalog has been
    shown — at which point the guild's pick history resets automatically.
-3. On the configured day each month (default: 1st at 7 PM ET), a random
-   unwatched film is picked, Claude writes a short pitch, and an embed with the
-   movie poster is posted in the configured channel.
 
 Slash commands
 ──────────────
@@ -124,14 +125,70 @@ class MoviesCog(commands.Cog, name="Movies"):
         )
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Catalog sync
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _sync_catalog(self) -> tuple[int, int]:
+        """
+        Fetch all Criterion Collection films from TMDB and upsert them into
+        the criterion_films table.
+
+        Only fetches /credits for films not already in the database, so monthly
+        auto-refreshes are fast (a handful of new titles at most). The initial
+        run — when the table is empty — takes a few minutes because every film
+        needs a separate /credits call for the director.
+
+        Returns
+        -------
+        tuple[int, int]
+            (added, updated) — counts of newly inserted and refreshed rows.
+
+        Raises
+        ------
+        TMDBError
+            If the TMDB API call fails.
+        """
+        with SessionLocal() as session:
+            existing_ids: set[int] = {
+                row.tmdb_id for row in session.query(CriterionFilm.tmdb_id).all()
+            }
+
+        films = get_criterion_films(
+            api_key=config.TMDB_API_KEY,
+            existing_ids=existing_ids,
+        )
+
+        added = 0
+        updated = 0
+        with SessionLocal() as session:
+            for film_data in films:
+                existing = session.get(CriterionFilm, film_data["tmdb_id"])
+                if existing is None:
+                    session.add(CriterionFilm(**film_data))
+                    added += 1
+                else:
+                    existing.title = film_data["title"]
+                    existing.year = film_data["year"]
+                    existing.overview = film_data["overview"]
+                    existing.poster_url = film_data["poster_url"]
+                    # Only overwrite director if credits were fetched this run
+                    # (director is None for existing_ids where /credits was skipped).
+                    if film_data["director"] is not None:
+                        existing.director = film_data["director"]
+                    updated += 1
+            session.commit()
+
+        return added, updated
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Scheduled action
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _post_movie_pick(self, guild_id: int) -> None:
         """
-        Called by APScheduler on the configured day of the month. Picks a
-        random unwatched Criterion film, generates a Claude pitch, and posts
-        the embed in the configured channel.
+        Called by APScheduler on the configured day of the month. Syncs the
+        Criterion catalog from TMDB, then picks a random unwatched film,
+        generates a Claude pitch, and posts the embed in the configured channel.
         """
         guild = self.bot.get_guild(guild_id)
         if guild is None:
@@ -155,6 +212,23 @@ class MoviesCog(commands.Cog, name="Movies"):
                 "set one with /movie config channel", guild_id
             )
             return
+
+        # Refresh the catalog before picking so newly added Criterion titles
+        # are available. Incremental — only new films need a /credits call.
+        try:
+            added, _ = self._sync_catalog()
+            if added:
+                logger.info(
+                    "Monthly catalog sync added %d new Criterion film(s) before pick "
+                    "for guild %d", added, guild_id,
+                )
+        except TMDBError as exc:
+            # Non-fatal: log the error and proceed with whatever is already
+            # in the database rather than cancelling the pick entirely.
+            logger.error(
+                "TMDB catalog sync failed for guild %d monthly pick: %s — "
+                "proceeding with existing catalog", guild_id, exc,
+            )
 
         film = self._pick_film(guild_id)
         if film is None:
@@ -355,44 +429,14 @@ class MoviesCog(commands.Cog, name="Movies"):
         """
         await interaction.response.defer(thinking=True)
 
-        # Pass existing IDs to skip /credits calls for already-stored films.
-        with SessionLocal() as session:
-            existing_ids: set[int] = {
-                row.tmdb_id for row in session.query(CriterionFilm.tmdb_id).all()
-            }
-
         try:
-            films = get_criterion_films(
-                api_key=config.TMDB_API_KEY,
-                existing_ids=existing_ids,
-            )
+            added, updated = self._sync_catalog()
         except TMDBError as exc:
             logger.error("TMDB catalog fetch failed during /movie setup: %s", exc)
             await interaction.followup.send(
                 f"Failed to fetch films from TMDB: {exc}", ephemeral=True
             )
             return
-
-        added = 0
-        updated = 0
-        with SessionLocal() as session:
-            for film_data in films:
-                existing = session.get(CriterionFilm, film_data["tmdb_id"])
-                if existing is None:
-                    session.add(CriterionFilm(**film_data))
-                    added += 1
-                else:
-                    # Refresh fields that might have changed on TMDB.
-                    existing.title = film_data["title"]
-                    existing.year = film_data["year"]
-                    existing.overview = film_data["overview"]
-                    existing.poster_url = film_data["poster_url"]
-                    # Only overwrite director if we actually fetched credits this
-                    # run (director is None for existing_ids where we skipped /credits).
-                    if film_data["director"] is not None:
-                        existing.director = film_data["director"]
-                    updated += 1
-            session.commit()
 
         logger.info(
             "Criterion catalog refreshed by guild %d: %d added, %d updated",
