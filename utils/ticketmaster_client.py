@@ -45,17 +45,20 @@ def get_upcoming_events(
     cities: list[str],
     api_key: str,
     days_ahead: int = 90,
+    min_days_ahead: int = 0,
 ) -> list[dict]:
     """
-    Fetch all upcoming music events in the specified cities for the next
-    days_ahead days.
+    Fetch all upcoming music events in the specified cities within a date window.
 
     Parameters
     ----------
-    cities     : List of city names to query, e.g. ["Toronto", "Montreal"].
-                 Each city is queried separately with countryCode=CA.
-    api_key    : Ticketmaster Discovery API key.
-    days_ahead : How many calendar days ahead to look (default 90).
+    cities         : List of city names to query, e.g. ["Toronto", "Montreal"].
+                     Each city is queried separately with countryCode=CA.
+    api_key        : Ticketmaster Discovery API key.
+    days_ahead     : How many calendar days ahead the window extends (default 90).
+    min_days_ahead : Minimum days from now before an event is included. Use this
+                     to skip events that are too soon to plan for — e.g. 30 to
+                     only surface events at least a month away (default 0).
 
     Returns
     -------
@@ -74,10 +77,11 @@ def get_upcoming_events(
         If any HTTP request to the Ticketmaster API fails.
     """
     now = datetime.now(timezone.utc)
+    start = now + timedelta(days=min_days_ahead)
     end = now + timedelta(days=days_ahead)
 
     # ISO 8601 format required by Ticketmaster.
-    start_dt = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_dt = start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_dt = end.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     all_events: list[dict] = []

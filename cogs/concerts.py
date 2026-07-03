@@ -1,17 +1,17 @@
 """
 cogs/concerts.py
 ────────────────
-Concert alerts cog. Checks Ticketmaster weekly for upcoming shows in Toronto
-and Montreal by artists on a per-guild watchlist, then posts alert embeds in
-the configured channel.
+Concert alerts cog. Checks Ticketmaster bi-weekly for upcoming shows by artists
+on a per-guild watchlist, then posts alert embeds in the configured channel.
+Only events at least 30 days away are surfaced, giving members time to plan.
 
 How it works
 ────────────
 1. On bot connect (on_ready), registers one APScheduler CronJob per guild
-   (default Monday 9 AM ET).
+   (default every other Monday at 9 AM ET, i.e. bi-weekly).
 2. When the job fires, it fetches all upcoming music events in the configured
-   cities from Ticketmaster and matches artist names against the watchlist using
-   case-insensitive comparison.
+   cities from Ticketmaster (starting 30 days from now) and matches artist
+   names against the watchlist using case-insensitive comparison.
 3. For each matched event not already in concert_alerts_posted for this guild,
    a Discord embed with event details and a ticket link is posted.
 4. The watchlist starts empty. Use /concert import with a Spotify playlist URL
@@ -29,8 +29,10 @@ Slash commands
 /concert config channel <#ch>      — Set the alert channel (admin)
 /concert config day <weekday>      — Set check day of week (admin)
 /concert config time <HH:MM>       — Set check time in ET (admin)
+/concert config add_city <city>    — Add a city to the search list (admin)
+/concert config remove_city <city> — Remove a city from the search list (admin)
 
-Default schedule: every Monday at 9:00 AM Eastern Time in #concert-alerts.
+Default schedule: every other Monday at 9:00 AM Eastern Time in #concert-alerts.
 Default cities: Toronto, Montreal.
 """
 
@@ -121,15 +123,17 @@ class ConcertsCog(commands.Cog, name="Concerts"):
             tz = cfg.timezone
             day = cfg.day_of_week or _DEFAULT_DAY
 
+        # week="*/2" fires on every even ISO week number, giving a bi-weekly cadence.
+        # day_of_week controls which day within that week the check runs.
         self.bot.scheduler.add_job(
             self._check_concerts,
-            CronTrigger(day_of_week=day, hour=hour, minute=minute, timezone=tz),
+            CronTrigger(week="*/2", day_of_week=day, hour=hour, minute=minute, timezone=tz),
             id=_job_id(guild_id),
             args=[guild_id],
             replace_existing=True,
         )
         logger.debug(
-            "Concert check job set for guild %d — %s at %02d:%02d %s",
+            "Concert check job set for guild %d — bi-weekly on %s at %02d:%02d %s",
             guild_id, day, hour, minute, tz,
         )
 
@@ -193,7 +197,11 @@ class ConcertsCog(commands.Cog, name="Concerts"):
             return
 
         try:
-            events = get_upcoming_events(cities=cities, api_key=config.TICKETMASTER_API_KEY)
+            events = get_upcoming_events(
+                cities=cities,
+                api_key=config.TICKETMASTER_API_KEY,
+                min_days_ahead=30,
+            )
         except TicketmasterError as exc:
             logger.error("Ticketmaster API failed for guild %d: %s", guild_id, exc)
             await channel.send(
@@ -634,6 +642,110 @@ class ConcertsCog(commands.Cog, name="Concerts"):
         await self._schedule_for_guild(interaction.guild_id)
         await interaction.response.send_message(
             f"Concert check will now run at **{time}** ({tz}).", ephemeral=True
+        )
+
+    @concert_config.command(
+        name="add_city",
+        description="Add a city to the concert search list (admin only)",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(city="City name to add, e.g. 'Ottawa' or 'Vancouver'")
+    async def concert_config_add_city(
+        self, interaction: discord.Interaction, city: str
+    ) -> None:
+        """Admin: Add a city to the list of cities searched on Ticketmaster."""
+        city = city.strip()
+        if not city:
+            await interaction.response.send_message(
+                "City name cannot be empty.", ephemeral=True
+            )
+            return
+
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="concerts")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "No concerts config exists yet. Use `/concert check` once to create it.",
+                    ephemeral=True,
+                )
+                return
+            options = cfg.content_options
+            cities: list[str] = options.get("cities", list(_DEFAULT_CITIES))
+
+            # Case-insensitive duplicate check.
+            if any(c.lower() == city.lower() for c in cities):
+                await interaction.response.send_message(
+                    f"**{city}** is already in the search list: {', '.join(cities)}",
+                    ephemeral=True,
+                )
+                return
+
+            cities.append(city)
+            options["cities"] = cities
+            cfg.content_options = options
+            session.commit()
+
+        logger.info(
+            "Added city %r to concerts config for guild %d", city, interaction.guild_id
+        )
+        await interaction.response.send_message(
+            f"Added **{city}** — searching in: {', '.join(cities)}.", ephemeral=True
+        )
+
+    @concert_config.command(
+        name="remove_city",
+        description="Remove a city from the concert search list (admin only)",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(city="City name to remove")
+    async def concert_config_remove_city(
+        self, interaction: discord.Interaction, city: str
+    ) -> None:
+        """Admin: Remove a city from the list of cities searched on Ticketmaster."""
+        city = city.strip()
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="concerts")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "No concerts config exists yet. Use `/concert check` once to create it.",
+                    ephemeral=True,
+                )
+                return
+            options = cfg.content_options
+            cities: list[str] = options.get("cities", list(_DEFAULT_CITIES))
+
+            # Case-insensitive match for removal.
+            updated = [c for c in cities if c.lower() != city.lower()]
+            if len(updated) == len(cities):
+                await interaction.response.send_message(
+                    f"**{city}** was not found in the search list: {', '.join(cities)}",
+                    ephemeral=True,
+                )
+                return
+            if not updated:
+                await interaction.response.send_message(
+                    "Cannot remove the last city — at least one city is required.",
+                    ephemeral=True,
+                )
+                return
+
+            options["cities"] = updated
+            cfg.content_options = options
+            session.commit()
+
+        logger.info(
+            "Removed city %r from concerts config for guild %d", city, interaction.guild_id
+        )
+        await interaction.response.send_message(
+            f"Removed **{city}** — now searching in: {', '.join(updated)}.", ephemeral=True
         )
 
     # ──────────────────────────────────────────────────────────────────────────
