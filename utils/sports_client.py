@@ -195,11 +195,18 @@ def _parse_event(event: dict, sport: str) -> dict:
     status_name = status_type.get("name", "")
     status_detail = status_type.get("shortDetail", "")
 
-    # The `details` array contains chronological scoring plays. Each entry
-    # represents one scoring moment with athlete, team, type, and clock info.
+    # The `details` array contains ALL competition events — goals, yellow/red
+    # cards, substitutions, etc. ESPN tags genuine scoring plays with
+    # scoringPlay=True. We filter on that flag so cards and subs don't trigger
+    # score alerts. The original enumeration index i is preserved (not reset
+    # after filtering) so last_play_index in the DB remains valid across polls.
     raw_details = competition.get("details", [])
     scoring_plays: list[dict] = []
     for i, detail in enumerate(raw_details):
+        # Skip non-scoring events. If the flag is absent (older API responses
+        # or American sports where details may be scoring-only), include it.
+        if not detail.get("scoringPlay", True):
+            continue
         athletes = detail.get("athletesInvolved", [])
         scorer = athletes[0].get("displayName", "") if athletes else ""
         team = detail.get("team", {}).get("displayName", "")
