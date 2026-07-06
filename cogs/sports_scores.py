@@ -330,29 +330,31 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                     )
 
                     if is_final:
-                        # Game just ended — post the final score.
+                        # Game just ended — post the final score, then delete
+                        # the tracking row. Deletion is cleaner than marking
+                        # status="final": the row simply disappears so subsequent
+                        # polls never need to inspect or filter on it.
                         await self._post_final_score(channel, game)
-                        new_status = "final"
+                        with SessionLocal() as session:
+                            db_row = session.get(LiveGameState, row.id)
+                            if db_row:
+                                session.delete(db_row)
+                                session.commit()
                     else:
-                        new_status = "in_progress"
-
-                    # Persist the updated state.
-                    with SessionLocal() as session:
-                        db_row = session.get(LiveGameState, row.id)
-                        if db_row:
-                            db_row.home_score = game["home_score"]
-                            db_row.away_score = game["away_score"]
-                            db_row.status = new_status
-                            db_row.last_play_index = new_last_idx
-                            db_row.updated_at = datetime.now(timezone.utc)
-                            session.commit()
-
-                # If row.status is already "final", do nothing — fully handled.
+                        # Game still in progress — persist the updated state.
+                        with SessionLocal() as session:
+                            db_row = session.get(LiveGameState, row.id)
+                            if db_row:
+                                db_row.home_score = game["home_score"]
+                                db_row.away_score = game["away_score"]
+                                db_row.last_play_index = new_last_idx
+                                db_row.updated_at = datetime.now(timezone.utc)
+                                session.commit()
 
         # ── Handle games that disappeared from the feed ───────────────────────
-        # If a game is marked "in_progress" in our DB but is no longer in the
-        # ESPN feed, it ended between polls without us catching STATUS_FINAL.
-        # Post a final embed with the last known scores and mark the row done.
+        # If a game is tracked in our DB but is no longer in the ESPN feed,
+        # it ended between polls without us catching STATUS_FINAL. Post a final
+        # embed with the last known scores and delete the tracking row.
         for game_id, row in existing.items():
             if row.status == "in_progress" and game_id not in live_game_ids:
                 logger.info(
@@ -370,11 +372,12 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 }
                 await self._post_final_score(channel, synthetic_game)
 
+                # Delete the row rather than marking it "final" — same convention
+                # as the normal final-score path above.
                 with SessionLocal() as session:
                     db_row = session.get(LiveGameState, row.id)
                     if db_row:
-                        db_row.status = "final"
-                        db_row.updated_at = datetime.now(timezone.utc)
+                        session.delete(db_row)
                         session.commit()
 
     # ──────────────────────────────────────────────────────────────────────────

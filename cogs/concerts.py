@@ -227,9 +227,14 @@ class ConcertsCog(commands.Cog, name="Concerts"):
             if matched_artist is None:
                 continue
 
-            await self._post_concert_embed(channel, event, matched_artist)
-
-            # Record the alert so it won't fire again on the next weekly check.
+            # Insert the deduplication row BEFORE posting the embed.
+            # This makes the unique constraint the atomic gate: if two concurrent
+            # checks (e.g. the scheduled job and a /concert check slash command)
+            # both reach this point for the same event, only the first insert
+            # commits and only that caller proceeds to post the embed. The second
+            # gets IntegrityError, rolls back, and hits `continue` — so no duplicate
+            # embed is ever posted. The old order (embed first, DB second) allowed a
+            # race window where both callers posted the embed before either committed.
             with SessionLocal() as session:
                 try:
                     session.add(ConcertAlertPosted(
@@ -242,11 +247,13 @@ class ConcertsCog(commands.Cog, name="Concerts"):
                         event_date=event.get("event_date") or "",
                     ))
                     session.commit()
-                    already_posted.add(event["event_id"])
                 except IntegrityError:
-                    # Another concurrent check already inserted this row.
+                    # Another concurrent check already claimed this event.
                     session.rollback()
+                    continue
 
+            await self._post_concert_embed(channel, event, matched_artist)
+            already_posted.add(event["event_id"])
             matched_count += 1
 
         logger.info(

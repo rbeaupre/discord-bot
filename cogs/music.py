@@ -28,8 +28,6 @@ Default schedule: every Monday at 10:00 AM Eastern Time in #new_releases.
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy.exc import IntegrityError
-
 import discord
 from apscheduler.triggers.cron import CronTrigger
 from discord import app_commands
@@ -484,35 +482,54 @@ class MusicCog(commands.Cog, name="Music"):
         with source="new_releases" if they aren't already present. This means
         any artist featured in the music post will automatically be watched for
         upcoming concert alerts without admin intervention.
+
+        The MusicPost inserts and the ArtistWatchlist inserts are intentionally
+        split into two separate passes. If both were done in the same SQLAlchemy
+        session, a session.flush() on the watchlist row would raise IntegrityError
+        for artists already in the watchlist, and the subsequent session.rollback()
+        would discard not just the watchlist row but also the MusicPost that was
+        staged in the same transaction — causing music_posts rows to be silently
+        lost. Splitting into two passes eliminates that entanglement entirely.
         """
+        # Pass 1: commit all MusicPost rows in a single transaction.
+        # There are no unique constraints on music_posts, so no IntegrityError risk.
         with SessionLocal() as session:
             for release in releases:
                 artist_id = release.get("artist_id")
                 if not artist_id:
                     continue
-
                 session.add(MusicPost(
                     guild_id=guild_id,
                     artist_id=artist_id,
                     artist_name=release.get("artist", "Unknown"),
                     release_title=release.get("title", "Unknown"),
                 ))
-
-                # Auto-add to concert watchlist. IntegrityError means the artist
-                # is already watching — skip silently without failing the whole commit.
-                artist_name = release.get("artist", "")
-                if artist_name:
-                    try:
-                        session.add(ArtistWatchlist(
-                            guild_id=guild_id,
-                            artist_name=artist_name,
-                            source="new_releases",
-                        ))
-                        session.flush()
-                    except IntegrityError:
-                        session.rollback()
-
             session.commit()
+
+        # Pass 2: auto-add each artist to the concert watchlist.
+        # A pre-check query replaces the old flush/rollback pattern so there is
+        # no risk of a transaction rollback swallowing the MusicPost inserts above.
+        # Each artist uses its own session so one skip does not affect the others.
+        for release in releases:
+            artist_name = release.get("artist", "")
+            if not artist_name:
+                continue
+            with SessionLocal() as session:
+                already_watching = (
+                    session.query(ArtistWatchlist)
+                    .filter(
+                        ArtistWatchlist.guild_id == guild_id,
+                        ArtistWatchlist.artist_name.ilike(artist_name),
+                    )
+                    .first()
+                )
+                if not already_watching:
+                    session.add(ArtistWatchlist(
+                        guild_id=guild_id,
+                        artist_name=artist_name,
+                        source="new_releases",
+                    ))
+                    session.commit()
 
         logger.debug(
             "Recorded %d posted artists for guild %d", len(releases), guild_id

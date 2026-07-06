@@ -75,13 +75,13 @@ def generate_trivia_question(sports: list[str]) -> dict:
 
 Generate one hard multiple-choice trivia question about one of these sports: {sports_str}.
 
-ERA REQUIREMENT — this is critical: your questions must cover a wide spread of time periods.
+ERA REQUIREMENT — this is critical: your questions must cover a wide spread of time periods. Do NOT default to the same era or the same tournament repeatedly.
+
 Randomly select one of these eras for this question:
   - Pre-1970 (early history, founding era, rule changes)
   - 1970s–1990s (classic era)
   - 2000s–2010s (modern era)
   - 2015–present (recent era)
-Do NOT default to the same era or the same tournament repeatedly. If you find yourself reaching for the same famous historical event (e.g. a specific World Cup, a single legendary season, or one iconic moment), stop and pick something different from another era or competition.
 
 The audience follows these sports closely, so avoid anything a casual fan would know. Good question topics include:
 - Specific records, statistics, or milestones (e.g. exact numbers, career totals, single-season marks)
