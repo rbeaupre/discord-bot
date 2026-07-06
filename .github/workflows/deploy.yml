@@ -1,0 +1,32 @@
+name: Deploy to GCP VM
+
+# Trigger on every push (including merged PRs) to the main branch.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: SSH deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy bot to VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          # Pull the latest code, rebuild the image, and restart the container.
+          # The -v flag mounts the Spotify OAuth cache file so it survives rebuilds.
+          script: |
+            set -e
+            cd ~/discord-bot
+            git pull
+            docker stop discord-bot && docker rm discord-bot
+            docker build -t discord-bot .
+            docker run -d --restart=always \
+              --env-file .env \
+              -v /home/${{ secrets.VM_USER }}/discord-bot/.spotify_cache:/app/.spotify_cache \
+              --name discord-bot discord-bot
