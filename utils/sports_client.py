@@ -53,20 +53,29 @@ _SPORT_ENDPOINTS: dict[str, list[str]] = {
 # Soccer uses half-specific names rather than a single "in progress" value,
 # and adds extra-time and shootout phases that must be tracked so scoring
 # plays during those phases are not silently dropped.
+#
+# STATUS_FULL_TIME is intentionally in ACTIVE_STATUSES rather than
+# FINAL_STATUSES. ESPN sets it at the end of 90 minutes as a transitional
+# state before extra time begins — treating it as final would cause the bot
+# to post a premature "draw" embed and delete the row, then re-announce the
+# game as starting when STATUS_EXTRA_TIME appears. By keeping it active, the
+# bot holds off until ESPN either moves to STATUS_EXTRA_TIME (game continues),
+# STATUS_FINAL (true regulation end), or the game disappears from the feed
+# (caught by the disappeared-game check).
 ACTIVE_STATUSES: frozenset[str] = frozenset({
     "STATUS_IN_PROGRESS",
     "STATUS_FIRST_HALF",
     "STATUS_SECOND_HALF",
     "STATUS_HALFTIME",
     "STATUS_END_PERIOD",
-    "STATUS_EXTRA_TIME",   # soccer: extra time (overtime) in progress
-    "STATUS_SHOOTOUT",     # soccer: penalty shootout in progress
+    "STATUS_FULL_TIME",    # end of 90 min — may still go to extra time
+    "STATUS_EXTRA_TIME",   # extra time in progress
+    "STATUS_SHOOTOUT",     # penalty shootout in progress
 })
 
-# ESPN status type names for games that have concluded.
+# ESPN status type names for games that have truly concluded.
 FINAL_STATUSES: frozenset[str] = frozenset({
     "STATUS_FINAL",
-    "STATUS_FULL_TIME",
     "STATUS_FINAL_OT",
     "STATUS_FINAL_AET",    # after extra time (soccer)
     "STATUS_FINAL_PEN",    # after penalties (soccer)
