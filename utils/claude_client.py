@@ -26,6 +26,7 @@ summarize_criterion_film(title, director, year, overview)  → str
 import json
 import logging
 import re
+from datetime import date
 
 import anthropic
 
@@ -71,17 +72,27 @@ def generate_trivia_question(sports: list[str]) -> dict:
     """
     sports_str = ", ".join(sports)
 
+    # Rotate through four eras day by day using the ordinal of today's date.
+    # This avoids relying on Claude to "randomly" select an era — LLMs have
+    # strong training-data biases (e.g. always landing on the 1974 World Cup)
+    # that make self-selected "randomness" unreliable across daily calls.
+    _ERAS = [
+        "Pre-1970 (early history, founding era, rule changes, legendary pioneers)",
+        "1970s–1990s (classic era — but avoid over-covered events like the 1974 World Cup; focus on lesser-known moments, records, and figures from this period)",
+        "2000s–2010s (modern era)",
+        "2015–present (recent era — transfer fees, contract details, recent records, current rosters)",
+    ]
+    forced_era = _ERAS[date.today().toordinal() % len(_ERAS)]
+
     prompt = f"""You are a sports trivia expert writing questions for a group of dedicated, knowledgeable fans.
 
 Generate one hard multiple-choice trivia question about one of these sports: {sports_str}.
 
-ERA REQUIREMENT — this is critical: your questions must cover a wide spread of time periods. Do NOT default to the same era or the same tournament repeatedly.
+ERA REQUIREMENT — this is mandatory, not optional: today's era is:
 
-Randomly select one of these eras for this question:
-  - Pre-1970 (early history, founding era, rule changes)
-  - 1970s–1990s (classic era)
-  - 2000s–2010s (modern era)
-  - 2015–present (recent era)
+  {forced_era}
+
+You MUST write a question from this era. Do not substitute a different era.
 
 The audience follows these sports closely, so avoid anything a casual fan would know. Good question topics include:
 - Specific records, statistics, or milestones (e.g. exact numbers, career totals, single-season marks)
