@@ -78,6 +78,13 @@ _SPORT_LABELS = {
     "soccer": "Soccer",
 }
 
+# Sports where every scoring play is worth exactly +1 point/goal.
+# For these sports we can reconstruct accurate intermediate scores when
+# multiple goals land in the same poll. NFL and MLB are excluded because
+# point values vary per play type (TD=6, PAT=1, FG=3, home run=1-4 runs, etc.)
+# and we can't reliably infer the increment from the details array alone.
+_UNIT_SCORE_SPORTS: frozenset[str] = frozenset({"soccer", "nhl"})
+
 
 def _job_id(guild_id: int, sport: str) -> str:
     """
@@ -278,10 +285,23 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 if is_active:
                     await self._post_game_start(channel, game)
 
-                    # Set last_play_index to the count of plays already in the
-                    # ESPN feed so we don't replay goals that happened before
-                    # we detected the game (e.g. if we caught it in the 2nd period).
-                    initial_play_idx = len(game["scoring_plays"]) - 1
+                    # Set last_play_index to the raw details-array index of the
+                    # last scoring play already in the ESPN feed. Future polls
+                    # only pick up plays whose raw index is strictly greater than
+                    # this value, so goals that existed before we started tracking
+                    # (e.g. we caught the game in the 2nd half) are never replayed.
+                    #
+                    # NOTE: do NOT use len(scoring_plays)-1 here. last_play_index
+                    # is compared against raw details-array indices, not positions
+                    # within the filtered scoring_plays list. Non-scoring events
+                    # (yellow cards, substitutions) appear between goals in the
+                    # raw array, so the last scoring play's raw index is always
+                    # >= len(scoring_plays)-1 and often significantly higher.
+                    # Using the count would leave old plays eligible for re-posting.
+                    initial_play_idx = (
+                        game["scoring_plays"][-1]["index"]
+                        if game["scoring_plays"] else -1
+                    )
 
                     with SessionLocal() as session:
                         try:
@@ -316,13 +336,62 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 row = existing[game_id]
 
                 if row.status == "in_progress":
-                    # Post any scoring plays that occurred since the last poll.
+                    # Collect scoring plays that appeared after the last poll.
                     new_plays = [
                         p for p in game["scoring_plays"]
                         if p["index"] > row.last_play_index
                     ]
-                    for play in new_plays:
-                        await self._post_scoring_play(channel, game, play)
+
+                    if new_plays and game["sport"] in _UNIT_SCORE_SPORTS:
+                        # For soccer and hockey each scoring play is +1, so we can
+                        # reconstruct accurate intermediate scores by working backwards
+                        # from the current ESPN score. This ensures the first of two
+                        # goals that land in the same poll shows "1-0" not "2-0".
+                        #
+                        # We count how many of the new plays belong to each side,
+                        # then subtract from the current ESPN score to find the
+                        # pre-batch starting point. This stays correct even when ESPN
+                        # details lagged by a poll, because the backwards calculation
+                        # is anchored to the authoritative current score.
+                        home_new = sum(
+                            1 for p in new_plays
+                            if p["team"].lower().strip()
+                            == game["home_team"].lower().strip()
+                        )
+                        away_new = len(new_plays) - home_new
+                        running_home = game["home_score"] - home_new
+                        running_away = game["away_score"] - away_new
+
+                        for play in new_plays:
+                            if (play["team"].lower().strip()
+                                    == game["home_team"].lower().strip()):
+                                running_home += 1
+                            else:
+                                running_away += 1
+                            await self._post_scoring_play(
+                                channel, game, play, running_home, running_away
+                            )
+
+                    else:
+                        # For NFL/MLB, score increments vary per play type and
+                        # can't be reliably inferred, so show the current ESPN score
+                        # in every embed (original behaviour).
+                        for play in new_plays:
+                            await self._post_scoring_play(
+                                channel, game, play,
+                                game["home_score"], game["away_score"],
+                            )
+
+                    # If the score changed but ESPN's details array had nothing new,
+                    # post a generic score update so the channel is never left showing
+                    # a stale scoreline. This covers the lag window where ESPN updates
+                    # the score field before populating the details array.
+                    score_changed = (
+                        game["home_score"] != row.home_score
+                        or game["away_score"] != row.away_score
+                    )
+                    if not new_plays and score_changed:
+                        await self._post_score_update(channel, game)
 
                     # Advance last_play_index to the most recent play we processed.
                     new_last_idx = (
@@ -415,19 +484,22 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         channel: discord.TextChannel,
         game: dict,
         play: dict,
+        display_home_score: int,
+        display_away_score: int,
     ) -> None:
         """
         Post a scoring update embed for a single scoring play.
 
         Parameters
         ----------
-        channel : Discord channel to post in.
-        game    : Current game state dict — used for the updated scoreline shown
-                  below the scorer's name. Note: ESPN's details array reports plays
-                  in chronological order so the game scores at the time of each
-                  play are embedded in the current game snapshot (i.e. the scores
-                  in game[] are the live/current total, not the per-play total).
-        play    : One entry from game["scoring_plays"].
+        channel             : Discord channel to post in.
+        game                : Current game state dict (used for team names, sport).
+        play                : One entry from game["scoring_plays"].
+        display_home_score  : The home score to show in this embed. For unit-score
+                              sports (soccer, hockey) this is the reconstructed
+                              per-play running total; for others it is the current
+                              ESPN score passed through from the caller.
+        display_away_score  : Equivalent away score.
         """
         sport = game["sport"]
         label = _SPORT_LABELS.get(sport, sport.upper())
@@ -440,10 +512,10 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         # Use the player name when available; fall back to the team name.
         title = f"{scorer} scores!" if scorer else f"{team} scores!"
 
-        # Show the running score after this play.
+        # Show the score at the moment of this specific play.
         score_line = (
-            f"{game['away_team']} {game['away_score']} "
-            f"— {game['home_score']} {game['home_team']}"
+            f"{game['away_team']} {display_away_score} "
+            f"— {display_home_score} {game['home_team']}"
         )
 
         embed = discord.Embed(
@@ -454,6 +526,43 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         )
         footer_parts = [p for p in [play_type, clock, label] if p]
         embed.set_footer(text=" · ".join(footer_parts))
+        await channel.send(embed=embed)
+
+    async def _post_score_update(
+        self,
+        channel: discord.TextChannel,
+        game: dict,
+    ) -> None:
+        """
+        Post a generic score update embed when the scoreline changed but ESPN's
+        details array hasn't populated the corresponding scoring play yet.
+
+        ESPN updates its score field and its details array asynchronously — the
+        score can jump without any new entries in details for up to one poll
+        interval. This fallback ensures the channel always reflects the current
+        score even when we can't attribute the change to a specific player.
+
+        Parameters
+        ----------
+        channel : Discord channel to post in.
+        game    : Current game state dict from get_live_playoff_games().
+        """
+        sport = game.get("sport", "")
+        label = _SPORT_LABELS.get(sport, sport.upper())
+        emoji = _SPORT_EMOJI.get(sport, "")
+
+        score_line = (
+            f"{game['away_team']} {game['away_score']} "
+            f"— {game['home_score']} {game['home_team']}"
+        )
+
+        embed = discord.Embed(
+            title=f"{emoji} Score Update",
+            description=score_line,
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"{label} · Playoff")
         await channel.send(embed=embed)
 
     async def _post_final_score(
