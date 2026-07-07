@@ -191,9 +191,18 @@ def _parse_event(event: dict, sport: str) -> dict:
             away_score = score
             away_penalty_score = pen_score
 
-    status_type = event.get("status", {}).get("type", {})
+    status_obj = event.get("status", {})
+    status_type = status_obj.get("type", {})
     status_name = status_type.get("name", "")
     status_detail = status_type.get("shortDetail", "")
+
+    # displayClock is the human-readable game clock at the top level of the
+    # status object (not inside status.type). For soccer ESPN uses a count-up
+    # clock so this shows elapsed minutes, e.g. "74:52" or "90:00" at full
+    # time. For NFL/NHL/MLB it is a countdown to zero ("2:34" remaining in Q3).
+    # period is the period/half/quarter/inning number.
+    display_clock: str = status_obj.get("displayClock", "")
+    period: int = status_obj.get("period", 0)
 
     # The `details` array contains ALL competition events — goals, yellow/red
     # cards, substitutions, etc. ESPN tags genuine scoring plays with
@@ -231,6 +240,8 @@ def _parse_event(event: dict, sport: str) -> dict:
         "away_penalty_score": away_penalty_score,
         "status_name": status_name,
         "status_detail": status_detail,
+        "display_clock": display_clock,
+        "period": period,
         "scoring_plays": scoring_plays,
     }
 

@@ -78,6 +78,52 @@ _SPORT_LABELS = {
     "soccer": "Soccer",
 }
 
+def _format_period_label(sport: str, period: int) -> str:
+    """
+    Return a short human-readable period label for the time field in the
+    final score embed, e.g. "Q4", "P3", "Half 2", "ET".
+
+    Returns an empty string when the period number is unavailable (0) or
+    when no label convention is defined for the sport.
+
+    Parameters
+    ----------
+    sport  : One of "nfl", "nhl", "mlb", "soccer".
+    period : ESPN's period number (1-based). Conventions differ by sport:
+             NFL: 1-4 = Q1-Q4, 5 = OT
+             NHL: 1-3 = P1-P3, 4 = OT, 5 = SO
+             MLB: inning number (no useful label needed here)
+             Soccer: 1 = first half, 2 = second half, 3-4 = extra time halves
+    """
+    if not period:
+        return ""
+
+    if sport == "nfl":
+        if period <= 4:
+            return f"Q{period}"
+        return "OT"
+
+    if sport == "nhl":
+        if period <= 3:
+            return f"P{period}"
+        if period == 4:
+            return "OT"
+        return "SO"
+
+    if sport == "soccer":
+        if period == 1:
+            return "1st Half"
+        if period == 2:
+            return "2nd Half"
+        if period in (3, 4):
+            return "ET"
+        if period >= 5:
+            return "Penalties"
+
+    # MLB innings don't benefit from a short label alongside the clock.
+    return ""
+
+
 # Sports where every scoring play is worth exactly +1 point/goal.
 # For these sports we can reconstruct accurate intermediate scores when
 # multiple goals land in the same poll. NFL and MLB are excluded because
@@ -574,8 +620,9 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         Post a "final score" embed when a game concludes.
 
         Handles regulation, extra time (AET), and penalty shootout (PEN) endings.
-        The embed title reflects how the game ended, and the penalty score is shown
-        in a separate field when available.
+        The embed title reflects how the game ended. A "Time" field shows the
+        final elapsed clock when available from ESPN's displayClock field.
+        The penalty score is shown in a separate field when available.
 
         Parameters
         ----------
@@ -584,7 +631,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                   or a synthetic dict built from DB state (for feed-disappearance
                   cases). Must contain home_team, away_team, home_score, away_score,
                   and sport. Optionally contains status_name, home_penalty_score,
-                  and away_penalty_score.
+                  away_penalty_score, display_clock, and period.
         """
         sport = game.get("sport", "")
         label = _SPORT_LABELS.get(sport, sport.upper())
@@ -638,6 +685,19 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 value=f"{away} {away_pen} — {home_pen} {home}",
                 inline=False,
             )
+
+        # Show the final elapsed time when ESPN provides it. For soccer ESPN
+        # uses a count-up clock so displayClock at full time shows "90:00" or
+        # similar; for AET/PEN it reflects the full 120 minutes. For NFL/NHL/MLB
+        # the clock counts down to "0:00" — we still show it so the user knows
+        # exactly when the game ended (e.g. "Q4 0:00"). Not available for the
+        # synthetic game dict built from DB state when a game disappears mid-poll.
+        display_clock: str = game.get("display_clock", "")
+        period: int = game.get("period", 0)
+        if display_clock:
+            time_label = _format_period_label(sport, period)
+            time_value = f"{time_label} · {display_clock}" if time_label else display_clock
+            embed.add_field(name="Time", value=time_value, inline=True)
 
         embed.set_footer(text=f"{label} · Playoff")
         await channel.send(embed=embed)
