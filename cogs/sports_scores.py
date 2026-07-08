@@ -131,6 +131,19 @@ def _format_period_label(sport: str, period: int) -> str:
 # and we can't reliably infer the increment from the details array alone.
 _UNIT_SCORE_SPORTS: frozenset[str] = frozenset({"soccer", "nhl"})
 
+# Statuses that indicate a game has just kicked off. Only these trigger the
+# "Game Starting" embed when we first see a game with no DB row. All other
+# active statuses (halftime, second half, full time, extra time, shootout)
+# mean the game has clearly been going for a while — in those cases we
+# silently create a tracking row without posting a start announcement.
+# This prevents spurious "Game Starting" embeds after a bot restart or
+# redeploy that lands mid-game, or when ESPN keeps a completed game in the
+# feed at STATUS_FULL_TIME long after it ended.
+_ANNOUNCE_START_STATUSES: frozenset[str] = frozenset({
+    "STATUS_IN_PROGRESS",   # generic in-progress (NFL, NHL, MLB, early soccer)
+    "STATUS_FIRST_HALF",    # soccer: explicitly the first half
+})
+
 
 def _job_id(guild_id: int, sport: str) -> str:
     """
@@ -329,7 +342,15 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             if game_id not in existing:
                 # First time we're seeing this game.
                 if is_active:
-                    await self._post_game_start(channel, game)
+                    # Only announce "Game Starting" when ESPN shows an early-game
+                    # status. Mid-game statuses (halftime, second half, full time,
+                    # extra time, shootout) mean the game is already well underway —
+                    # silently create the tracking row without the embed so we can
+                    # still catch scoring plays and the final without spamming the
+                    # channel. This also handles post-restart / post-redeploy polls
+                    # where the bot has no DB rows but ESPN still shows active games.
+                    if status_name in _ANNOUNCE_START_STATUSES:
+                        await self._post_game_start(channel, game)
 
                     # Set last_play_index to the raw details-array index of the
                     # last scoring play already in the ESPN feed. Future polls
