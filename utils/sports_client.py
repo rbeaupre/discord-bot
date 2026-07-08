@@ -149,15 +149,20 @@ def _parse_event(event: dict, sport: str) -> dict:
     Returns
     -------
     dict with keys:
-        game_id        – ESPN event ID (str)
-        sport          – sport name (str)
-        home_team      – home team display name (str)
-        away_team      – away team display name (str)
-        home_score     – current home score (int, default 0)
-        away_score     – current away score (int, default 0)
-        status_name    – ESPN status type name, e.g. "STATUS_IN_PROGRESS" (str)
-        status_detail  – short human-readable status, e.g. "Q2 5:30" (str)
-        scoring_plays  – list of scoring play dicts (list[dict])
+        game_id            – ESPN event ID (str)
+        sport              – sport name (str)
+        home_team          – home team display name (str)
+        away_team          – away team display name (str)
+        home_score         – current home score (int, default 0)
+        away_score         – current away score (int, default 0)
+        home_penalty_score – penalty shootout score for home team (int | None)
+        away_penalty_score – penalty shootout score for away team (int | None)
+        status_name        – ESPN status type name, e.g. "STATUS_IN_PROGRESS" (str)
+        status_detail      – short human-readable status, e.g. "Q2 5:30" (str)
+        completed          – True when ESPN marks the event as finished (bool)
+        display_clock      – human-readable game clock, e.g. "74:52" (str)
+        period             – period/half/quarter number (int)
+        scoring_plays      – list of scoring play dicts (list[dict])
     """
     game_id = event.get("id", "")
 
@@ -205,6 +210,13 @@ def _parse_event(event: dict, sport: str) -> dict:
     status_name = status_type.get("name", "")
     status_detail = status_type.get("shortDetail", "")
 
+    # completed is ESPN's authoritative flag indicating the game is fully over.
+    # It can be True even when status_name is still a transitional active value
+    # (e.g. STATUS_FULL_TIME right after regulation before ESPN pushes FINAL).
+    # We surface it so the poller can skip re-tracking genuinely finished games
+    # whose tracking rows were already deleted.
+    completed: bool = bool(status_type.get("completed", False))
+
     # displayClock is the human-readable game clock at the top level of the
     # status object (not inside status.type). For soccer ESPN uses a count-up
     # clock so this shows elapsed minutes, e.g. "74:52" or "90:00" at full
@@ -249,6 +261,7 @@ def _parse_event(event: dict, sport: str) -> dict:
         "away_penalty_score": away_penalty_score,
         "status_name": status_name,
         "status_detail": status_detail,
+        "completed": completed,
         "display_clock": display_clock,
         "period": period,
         "scoring_plays": scoring_plays,

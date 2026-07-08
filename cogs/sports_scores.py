@@ -340,8 +340,22 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             is_final = status_name in FINAL_STATUSES
 
             if game_id not in existing:
-                # First time we're seeing this game.
-                if is_active:
+                # First time we're seeing this game (or the tracking row was deleted).
+                #
+                # Guard: if ESPN marks the game as completed but we have no row, it
+                # either ended between polls without us catching it (safe to skip — we
+                # already handled the "disappeared from feed" path) or it's a game whose
+                # row was manually deleted while ESPN still had it at STATUS_FULL_TIME
+                # before transitioning to the true final status. Either way, do not
+                # re-create a tracking row for a completed game we've already processed.
+                if game.get("completed", False):
+                    logger.debug(
+                        "Skipping completed game %s (%s vs %s) — no tracking row, "
+                        "ESPN completed=True",
+                        game_id, game["away_team"], game["home_team"],
+                    )
+
+                elif is_active:
                     # Only announce "Game Starting" when ESPN shows an early-game
                     # status. Mid-game statuses (halftime, second half, full time,
                     # extra time, shootout) mean the game is already well underway —
@@ -409,7 +423,38 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                         if p["index"] > row.last_play_index
                     ]
 
-                    if new_plays and game["sport"] in _UNIT_SCORE_SPORTS:
+                    is_shootout = (status_name == "STATUS_SHOOTOUT")
+
+                    if new_plays and is_shootout:
+                        # During a penalty shootout each kick scores +1 in the
+                        # penalty tally. ESPN keeps the regulation score (tied) in
+                        # home_score/away_score and exposes the running penalty total
+                        # as home_penalty_score/away_penalty_score. We use those for
+                        # backwards reconstruction so each embed shows the correct
+                        # "Penalties: X — Y" tally rather than the frozen tied score.
+                        current_home_pen = game.get("home_penalty_score") or 0
+                        current_away_pen = game.get("away_penalty_score") or 0
+                        home_new = sum(
+                            1 for p in new_plays
+                            if p["team"].lower().strip()
+                            == game["home_team"].lower().strip()
+                        )
+                        away_new = len(new_plays) - home_new
+                        running_home = current_home_pen - home_new
+                        running_away = current_away_pen - away_new
+
+                        for play in new_plays:
+                            if (play["team"].lower().strip()
+                                    == game["home_team"].lower().strip()):
+                                running_home += 1
+                            else:
+                                running_away += 1
+                            await self._post_scoring_play(
+                                channel, game, play, running_home, running_away,
+                                is_penalty=True,
+                            )
+
+                    elif new_plays and game["sport"] in _UNIT_SCORE_SPORTS:
                         # For soccer and hockey each scoring play is +1, so we can
                         # reconstruct accurate intermediate scores by working backwards
                         # from the current ESPN score. This ensures the first of two
@@ -553,6 +598,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         play: dict,
         display_home_score: int,
         display_away_score: int,
+        is_penalty: bool = False,
     ) -> None:
         """
         Post a scoring update embed for a single scoring play.
@@ -565,8 +611,12 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         display_home_score  : The home score to show in this embed. For unit-score
                               sports (soccer, hockey) this is the reconstructed
                               per-play running total; for others it is the current
-                              ESPN score passed through from the caller.
+                              ESPN score passed through from the caller. During a
+                              penalty shootout this is the running penalty tally.
         display_away_score  : Equivalent away score.
+        is_penalty          : When True, the embed description is prefixed with
+                              "Penalties:" so the channel clearly shows the shootout
+                              tally rather than the frozen regulation scoreline.
         """
         sport = game["sport"]
         label = _SPORT_LABELS.get(sport, sport.upper())
@@ -579,11 +629,19 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         # Use the player name when available; fall back to the team name.
         title = f"{scorer} scores!" if scorer else f"{team} scores!"
 
-        # Show the score at the moment of this specific play.
-        score_line = (
-            f"{game['away_team']} {display_away_score} "
-            f"— {display_home_score} {game['home_team']}"
-        )
+        # Show the score at the moment of this specific play. During a penalty
+        # shootout the regulation score is frozen (a tie), so we prefix the line
+        # with "Penalties:" and show the running penalty tally instead.
+        if is_penalty:
+            score_line = (
+                f"Penalties: {game['away_team']} {display_away_score} "
+                f"— {display_home_score} {game['home_team']}"
+            )
+        else:
+            score_line = (
+                f"{game['away_team']} {display_away_score} "
+                f"— {display_home_score} {game['home_team']}"
+            )
 
         embed = discord.Embed(
             title=title,
