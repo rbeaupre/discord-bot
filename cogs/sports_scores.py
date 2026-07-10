@@ -510,11 +510,16 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                         new_plays[-1]["index"] if new_plays else row.last_play_index
                     )
 
-                    if is_final:
-                        # Game just ended — post the final score, then delete
-                        # the tracking row. Deletion is cleaner than marking
-                        # status="final": the row simply disappears so subsequent
-                        # polls never need to inspect or filter on it.
+                    is_done = is_final or game.get("completed", False)
+
+                    if is_done:
+                        # Game just ended. This is triggered either by a recognised
+                        # final status (STATUS_FINAL, STATUS_FINAL_PEN, etc.) or by
+                        # ESPN's completed=True flag, which ESPN sets even when it
+                        # stalls at a transitional status like STATUS_FULL_TIME or
+                        # STATUS_SHOOTOUT without ever pushing a proper final status.
+                        # Using completed as a secondary trigger ensures we always
+                        # post the final embed and clean up the row.
                         await self._post_final_score(channel, game)
                         with SessionLocal() as session:
                             db_row = session.get(LiveGameState, row.id)
@@ -724,10 +729,21 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         away_pen = game.get("away_penalty_score")
 
         # Choose an appropriate title based on how the game ended.
+        # The primary signal is status_name. When ESPN stalls at a transitional
+        # status (e.g. STATUS_SHOOTOUT or STATUS_FULL_TIME) and we're here via
+        # completed=True rather than a recognised final status, we fall back to
+        # inferring the ending from penalty score presence and the period number.
         if status_name == "STATUS_FINAL_AET":
             title = "Final (After Extra Time)"
         elif status_name == "STATUS_FINAL_PEN":
             title = "Final (After Penalties)"
+        elif home_pen is not None and away_pen is not None:
+            # Penalty shootout scores are present — game ended in a shootout even
+            # though ESPN never surfaced STATUS_FINAL_PEN.
+            title = "Final (After Penalties)"
+        elif game.get("period", 0) >= 3:
+            # Period 3 or above means the game went to extra time halves.
+            title = "Final (After Extra Time)"
         else:
             title = "Final Score"
 
