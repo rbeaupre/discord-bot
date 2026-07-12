@@ -131,6 +131,21 @@ def _format_period_label(sport: str, period: int) -> str:
 # and we can't reliably infer the increment from the details array alone.
 _UNIT_SCORE_SPORTS: frozenset[str] = frozenset({"soccer", "nhl"})
 
+# ESPN sets status.type.completed=True right at the 90-minute whistle for
+# soccer knockout matches that are about to go to extra time — the flag
+# reflects "this phase of the match is over", not "the whole match is over".
+# Because of this we can't trust completed=True as an immediate final signal
+# while the status is still STATUS_FULL_TIME: LiveGameState.pending_final_since
+# tracks when we first saw the game stalled there, and we hold off treating
+# it as done until that timestamp is this many seconds in the past — giving
+# ESPN a chance to either push STATUS_EXTRA_TIME (game continues, the timer
+# resets) or a genuine terminal status. If neither happens in time we trust
+# the completed flag and post the final anyway — that's the scenario the
+# completed-flag fallback exists for in the first place (a game that truly
+# stalls at STATUS_FULL_TIME, e.g. a group-stage draw ESPN never bothers to
+# push STATUS_FINAL for).
+_FULL_TIME_GRACE_SECONDS = 120
+
 # Statuses that indicate a game has just kicked off. Only these trigger the
 # "Game Starting" embed when we first see a game with no DB row. All other
 # active statuses (halftime, second half, full time, extra time, shootout)
@@ -510,16 +525,48 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                         new_plays[-1]["index"] if new_plays else row.last_play_index
                     )
 
-                    is_done = is_final or game.get("completed", False)
+                    completed_flag = game.get("completed", False)
+
+                    # See _FULL_TIME_GRACE_SECONDS: completed=True at
+                    # STATUS_FULL_TIME is ambiguous for soccer (regulation over,
+                    # but extra time may follow), so it only counts as done once
+                    # it has persisted across polls for the grace period. Any
+                    # recognised final status, or completed=True at any other
+                    # stalled status (e.g. STATUS_SHOOTOUT), is trusted immediately.
+                    #
+                    # NOTE: pending_final_since is a naive-UTC column (no
+                    # timezone=True), so we compare against naive
+                    # datetime.utcnow() here rather than the tz-aware
+                    # datetime.now(timezone.utc) used elsewhere in this file —
+                    # a value written as tz-aware comes back naive on the next
+                    # poll's fresh DB read, and subtracting aware from naive
+                    # raises TypeError.
+                    now = datetime.utcnow()
+                    new_pending_final_since = row.pending_final_since
+
+                    if completed_flag and status_name == "STATUS_FULL_TIME" and not is_final:
+                        if row.pending_final_since is None:
+                            # First poll to see it stalled here — start the grace
+                            # timer and keep treating the game as in progress.
+                            new_pending_final_since = now
+                            is_done = False
+                        else:
+                            elapsed = (now - row.pending_final_since).total_seconds()
+                            is_done = elapsed >= _FULL_TIME_GRACE_SECONDS
+                    else:
+                        # Status moved on from STATUS_FULL_TIME (e.g. to
+                        # STATUS_EXTRA_TIME — the game continued) or this poll
+                        # resolved to a real final. Either way, no grace timer
+                        # should still be running for this game.
+                        new_pending_final_since = None
+                        is_done = is_final or completed_flag
 
                     if is_done:
-                        # Game just ended. This is triggered either by a recognised
-                        # final status (STATUS_FINAL, STATUS_FINAL_PEN, etc.) or by
-                        # ESPN's completed=True flag, which ESPN sets even when it
-                        # stalls at a transitional status like STATUS_FULL_TIME or
-                        # STATUS_SHOOTOUT without ever pushing a proper final status.
-                        # Using completed as a secondary trigger ensures we always
-                        # post the final embed and clean up the row.
+                        # Game just ended. This is triggered by a recognised final
+                        # status (STATUS_FINAL, STATUS_FINAL_PEN, etc.), by
+                        # completed=True at a non-STATUS_FULL_TIME stalled status,
+                        # or by completed=True having persisted at STATUS_FULL_TIME
+                        # past the grace period above.
                         await self._post_final_score(channel, game)
                         with SessionLocal() as session:
                             db_row = session.get(LiveGameState, row.id)
@@ -534,6 +581,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                                 db_row.home_score = game["home_score"]
                                 db_row.away_score = game["away_score"]
                                 db_row.last_play_index = new_last_idx
+                                db_row.pending_final_since = new_pending_final_since
                                 db_row.updated_at = datetime.now(timezone.utc)
                                 session.commit()
 

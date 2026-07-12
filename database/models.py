@@ -449,6 +449,16 @@ class LiveGameState(Base):
     # this game's state.
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
+    # UTC timestamp of the first poll where we saw this game stalled at
+    # STATUS_FULL_TIME with ESPN's completed flag set. NULL when no grace
+    # period is currently running for this game. ESPN sets completed=True at
+    # the 90-minute whistle even for soccer knockout games that are about to
+    # go to extra time, so STATUS_FULL_TIME + completed=True is ambiguous —
+    # we hold off treating it as a real final until this timestamp is more
+    # than _FULL_TIME_GRACE_SECONDS in the past, giving ESPN a chance to
+    # push STATUS_EXTRA_TIME instead (which resets this back to NULL).
+    pending_final_since = Column(DateTime, nullable=True, default=None)
+
     # One game row per guild — prevents duplicate "game starting" embeds if
     # two poll ticks fire simultaneously.
     __table_args__ = (
