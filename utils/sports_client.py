@@ -54,14 +54,28 @@ _SPORT_ENDPOINTS: dict[str, list[str]] = {
 # and adds extra-time and shootout phases that must be tracked so scoring
 # plays during those phases are not silently dropped.
 #
+# These names are used for cosmetic / secondary decisions only (which embed
+# title to use, whether to announce "Game Starting", whether to run the
+# penalty-tally reconstruction) — NOT to decide whether a game is trackable.
+# That decision used to be based on membership in this list, and on
+# 2026-07-11 that caused a real bug: this set listed "STATUS_EXTRA_TIME" for
+# soccer extra time, but ESPN's actual status name is "STATUS_OVERTIME".
+# The wrong name meant a game entering extra time fell out of every status
+# set below, get_live_playoff_games() silently dropped it from the feed, and
+# the poller's "disappeared from the feed" fallback posted a final with the
+# frozen regulation score and stopped tracking — mid-match. See
+# get_live_playoff_games() for the fix: trackability is now based on ESPN's
+# status.type.state field ("pre"/"in"/"post"), a much smaller and more
+# stable surface than enumerating every status name ESPN might use.
+#
 # STATUS_FULL_TIME is intentionally in ACTIVE_STATUSES rather than
 # FINAL_STATUSES. ESPN sets it at the end of 90 minutes as a transitional
 # state before extra time begins — treating it as final would cause the bot
 # to post a premature "draw" embed and delete the row, then re-announce the
-# game as starting when STATUS_EXTRA_TIME appears. By keeping it active, the
-# bot holds off until ESPN either moves to STATUS_EXTRA_TIME (game continues),
-# STATUS_FINAL (true regulation end), or the game disappears from the feed
-# (caught by the disappeared-game check).
+# game as starting when STATUS_OVERTIME appears. By keeping it active, the
+# bot holds off until ESPN either moves to STATUS_OVERTIME (game continues),
+# STATUS_FINAL (true regulation end), or the completed flag confirms the
+# match is truly over (see cogs/sports_scores.py's full-time grace period).
 ACTIVE_STATUSES: frozenset[str] = frozenset({
     "STATUS_IN_PROGRESS",
     "STATUS_FIRST_HALF",
@@ -69,8 +83,8 @@ ACTIVE_STATUSES: frozenset[str] = frozenset({
     "STATUS_HALFTIME",
     "STATUS_END_PERIOD",
     "STATUS_FULL_TIME",    # end of 90 min — may still go to extra time
-    "STATUS_EXTRA_TIME",   # extra time in progress
-    "STATUS_SHOOTOUT",     # penalty shootout in progress
+    "STATUS_OVERTIME",     # extra time in progress (confirmed via live API response)
+    "STATUS_SHOOTOUT",     # penalty shootout in progress — unconfirmed name, see below
 })
 
 # ESPN status type names for games that have truly concluded.
@@ -80,9 +94,6 @@ FINAL_STATUSES: frozenset[str] = frozenset({
     "STATUS_FINAL_AET",    # after extra time (soccer)
     "STATUS_FINAL_PEN",    # after penalties (soccer)
 })
-
-# All statuses worth tracking (active + final).
-_TRACKABLE_STATUSES: frozenset[str] = ACTIVE_STATUSES | FINAL_STATUSES
 
 
 class SportsAPIError(Exception):
@@ -159,6 +170,11 @@ def _parse_event(event: dict, sport: str) -> dict:
         away_penalty_score – penalty shootout score for away team (int | None)
         status_name        – ESPN status type name, e.g. "STATUS_IN_PROGRESS" (str)
         status_detail      – short human-readable status, e.g. "Q2 5:30" (str)
+        state              – ESPN's coarse lifecycle field: "pre", "in", or
+                              "post" (str). Used by get_live_playoff_games()
+                              to decide trackability instead of matching
+                              status_name against an enumerated list — see
+                              the comment above ACTIVE_STATUSES for why.
         completed          – True when ESPN marks the event as finished (bool)
         display_clock      – human-readable game clock, e.g. "74:52" (str)
         period             – period/half/quarter number (int)
@@ -209,6 +225,7 @@ def _parse_event(event: dict, sport: str) -> dict:
     status_type = status_obj.get("type", {})
     status_name = status_type.get("name", "")
     status_detail = status_type.get("shortDetail", "")
+    state = status_type.get("state", "")
 
     # completed is ESPN's authoritative flag indicating the game is fully over.
     # It can be True even when status_name is still a transitional active value
@@ -261,6 +278,7 @@ def _parse_event(event: dict, sport: str) -> dict:
         "away_penalty_score": away_penalty_score,
         "status_name": status_name,
         "status_detail": status_detail,
+        "state": state,
         "completed": completed,
         "display_clock": display_clock,
         "period": period,
@@ -273,8 +291,19 @@ def get_live_playoff_games(sport: str) -> list[dict]:
     Return all currently in-progress or just-finished playoff games for a sport.
 
     Queries every endpoint associated with the sport (soccer has four), filters
-    to playoff events only, and returns only events with a trackable status
-    (active or final). De-duplicates across endpoints by game ID.
+    to playoff events only, and returns only events that have started (ESPN's
+    status.type.state is "in" or "post" — i.e. not "pre"). De-duplicates
+    across endpoints by game ID.
+
+    Trackability is intentionally based on the `state` field rather than
+    matching status_name against ACTIVE_STATUSES/FINAL_STATUSES. Those lists
+    have to enumerate every status name ESPN might use, and getting one wrong
+    silently drops the game from the feed — which is exactly what happened on
+    2026-07-11 ("STATUS_EXTRA_TIME" vs the real "STATUS_OVERTIME"): the game
+    disappeared from the feed the moment extra time began, and the poller's
+    disappeared-from-feed fallback posted a final with the frozen regulation
+    score. `state` only has three possible values, so it can't go stale the
+    same way.
 
     Parameters
     ----------
@@ -283,8 +312,8 @@ def get_live_playoff_games(sport: str) -> list[dict]:
     Returns
     -------
     list[dict]
-        Game dicts as returned by _parse_event(), filtered to trackable
-        statuses only. Empty list when no playoff games are live.
+        Game dicts as returned by _parse_event(), filtered to games that have
+        started. Empty list when no playoff games are live.
 
     Raises
     ------
@@ -305,7 +334,9 @@ def get_live_playoff_games(sport: str) -> list[dict]:
 
             parsed = _parse_event(event, sport)
 
-            if parsed["status_name"] not in _TRACKABLE_STATUSES:
+            # "pre" means the game hasn't kicked off yet — not trackable.
+            # Anything else ("in" or "post") is live or just concluded.
+            if parsed["state"] == "pre":
                 continue
 
             # De-duplicate in case the same match appears on multiple endpoints.
