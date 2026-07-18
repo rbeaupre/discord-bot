@@ -8,7 +8,11 @@ model selection, error handling, and JSON parsing live in one place.
 
 Public functions
 ----------------
-generate_trivia_question(sports)  → dict
+get_daily_trivia_era()  → tuple[str, str]
+    Return the (era_key, era_label) pair for today's date-derived trivia
+    era rotation.
+
+generate_trivia_question(sports, era_label, avoid_questions)  → dict
     Generate a multiple-choice sports trivia question.
 
 describe_release(artist, title, genre)  → str
@@ -43,7 +47,42 @@ _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
 _MODEL = "claude-haiku-4-5-20251001"
 
 
-def generate_trivia_question(sports: list[str]) -> dict:
+# Rotate through four eras day by day using the ordinal of today's date. This
+# avoids relying on Claude to "randomly" select an era — LLMs have strong
+# training-data biases (e.g. always landing on the 1974 World Cup) that make
+# self-selected "randomness" unreliable across daily calls.
+#
+# Each entry is (era_key, era_label): era_key is a short stable identifier
+# used to tag and look up TriviaQuestionPost history (see
+# get_daily_trivia_era() and cogs/trivia.py); era_label is the full
+# descriptive text injected into the prompt below. Keeping them separate
+# means editing the prompt wording for an era doesn't invalidate existing
+# history rows keyed on era_key.
+_ERAS: list[tuple[str, str]] = [
+    ("pre_1970", "Pre-1970 (early history, founding era, rule changes, legendary pioneers)"),
+    ("1970s_1990s", "1970s–1990s (classic era — but avoid over-covered events like the 1974 World Cup; focus on lesser-known moments, records, and figures from this period)"),
+    ("2000s_2010s", "2000s–2010s (modern era)"),
+    ("2015_present", "2015–present (recent era — transfer fees, contract details, recent records, current rosters)"),
+]
+
+
+def get_daily_trivia_era() -> tuple[str, str]:
+    """
+    Return the (era_key, era_label) pair for today's date-derived era rotation.
+
+    Callers use era_key to filter TriviaQuestionPost history (so the avoid-list
+    passed to generate_trivia_question only contains questions from the same
+    era) and era_label as the era argument to generate_trivia_question itself.
+    """
+    index = date.today().toordinal() % len(_ERAS)
+    return _ERAS[index]
+
+
+def generate_trivia_question(
+    sports: list[str],
+    era_label: str,
+    avoid_questions: list[str] | None = None,
+) -> dict:
     """
     Ask Claude to generate one multiple-choice sports trivia question.
 
@@ -54,6 +93,16 @@ def generate_trivia_question(sports: list[str]) -> dict:
     ----------
     sports : list[str]
         Sport names Claude can draw from, e.g. ["soccer", "baseball"].
+    era_label : str
+        The era_label half of get_daily_trivia_era()'s return value — the
+        full descriptive era text injected into the prompt as a mandatory
+        constraint.
+    avoid_questions : list[str] | None
+        Question text from recently posted trivia in this same era (see
+        cogs/trivia.py, which queries TriviaQuestionPost filtered by era_key).
+        Passed to Claude as an explicit avoid-list so the rotation doesn't
+        keep regenerating the same "greatest hits" fact every time this era
+        comes back around. None or empty means no history exists yet.
 
     Returns
     -------
@@ -72,17 +121,16 @@ def generate_trivia_question(sports: list[str]) -> dict:
     """
     sports_str = ", ".join(sports)
 
-    # Rotate through four eras day by day using the ordinal of today's date.
-    # This avoids relying on Claude to "randomly" select an era — LLMs have
-    # strong training-data biases (e.g. always landing on the 1974 World Cup)
-    # that make self-selected "randomness" unreliable across daily calls.
-    _ERAS = [
-        "Pre-1970 (early history, founding era, rule changes, legendary pioneers)",
-        "1970s–1990s (classic era — but avoid over-covered events like the 1974 World Cup; focus on lesser-known moments, records, and figures from this period)",
-        "2000s–2010s (modern era)",
-        "2015–present (recent era — transfer fees, contract details, recent records, current rosters)",
-    ]
-    forced_era = _ERAS[date.today().toordinal() % len(_ERAS)]
+    # Rendered as its own paragraph right after the era requirement so
+    # Claude sees "here's the era, and here's specifically what not to
+    # repeat within it" as one coherent instruction.
+    avoid_section = ""
+    if avoid_questions:
+        avoid_block = "\n".join(f"- {q}" for q in avoid_questions)
+        avoid_section = f"""
+
+AVOID REPEATING — you already asked these questions recently during this same era. Write about a different fact, record, event, or figure than any of them, even if reworded:
+{avoid_block}"""
 
     prompt = f"""You are a sports trivia expert writing questions for a group of dedicated, knowledgeable fans.
 
@@ -90,9 +138,10 @@ Generate one hard multiple-choice trivia question about one of these sports: {sp
 
 ERA REQUIREMENT — this is mandatory, not optional: today's era is:
 
-  {forced_era}
+  {era_label}
 
 You MUST write a question from this era. Do not substitute a different era.
+{avoid_section}
 
 The audience follows these sports closely, so avoid anything a casual fan would know. Good question topics include:
 - Specific records, statistics, or milestones (e.g. exact numbers, career totals, single-season marks)

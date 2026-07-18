@@ -32,8 +32,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from database.db import SessionLocal
-from database.models import ScheduleConfig
-from utils.claude_client import generate_trivia_question
+from database.models import ScheduleConfig, TriviaQuestionPost
+from utils.claude_client import generate_trivia_question, get_daily_trivia_era
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,13 @@ _DEFAULT_MINUTE = 0
 _DEFAULT_TIMEZONE = "America/New_York"
 _DEFAULT_SPORTS = ["soccer", "baseball", "football", "hockey"]
 _DEFAULT_CHANNEL_NAME = "sports-chat"                       # fallback channel name
+
+# How many of the most recent same-era questions to feed back to Claude as an
+# avoid-list. Capped rather than sending full history so the prompt doesn't
+# grow unbounded over months of daily posts — recent repeats are the ones
+# that actually stand out to the group, and each era only recurs every 4
+# days, so this covers roughly two months of history for that era.
+_AVOID_HISTORY_LIMIT = 15
 
 
 def _job_id(guild_id: int) -> str:
@@ -150,22 +157,41 @@ class TriviaCog(commands.Cog, name="Trivia"):
             )
             return
 
-        await self._send_trivia_embed(channel, sports)
+        await self._send_trivia_embed(channel, guild_id, sports)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Embed builder
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _send_trivia_embed(
-        self, channel: discord.TextChannel, sports: list[str]
+        self, channel: discord.TextChannel, guild_id: int, sports: list[str]
     ) -> None:
         """
         Generate a trivia question via Claude and post it as a Discord embed.
         The answer is wrapped in a Discord spoiler (||text||) so members have
         to click/tap to reveal it.
+
+        Before generating, looks up this guild's recent TriviaQuestionPost
+        history for today's era and passes it to Claude as an avoid-list —
+        otherwise Claude tends to regenerate the same "greatest hits" fact
+        every time an era comes back around in the rotation (every 4 days).
+        After a successful post, records the new question so future posts
+        in this era avoid repeating it too.
         """
+        era_key, era_label = get_daily_trivia_era()
+
+        with SessionLocal() as session:
+            recent = (
+                session.query(TriviaQuestionPost)
+                .filter_by(guild_id=guild_id, era=era_key)
+                .order_by(TriviaQuestionPost.posted_at.desc())
+                .limit(_AVOID_HISTORY_LIMIT)
+                .all()
+            )
+            avoid_questions = [row.question_text for row in recent]
+
         try:
-            data = generate_trivia_question(sports)
+            data = generate_trivia_question(sports, era_label, avoid_questions)
         except Exception as exc:
             # Log the full error but show a clean message to Discord users.
             logger.error("Trivia generation failed: %s", exc, exc_info=True)
@@ -196,6 +222,18 @@ class TriviaCog(commands.Cog, name="Trivia"):
         embed.set_footer(text="Use /trivia play to get another question any time!")
 
         await channel.send(embed=embed)
+
+        # Record this question so future posts in this era avoid repeating
+        # it — see the avoid-list lookup at the top of this method. Truncated
+        # to fit the column, matching CriterionFilm's overview truncation.
+        with SessionLocal() as session:
+            session.add(TriviaQuestionPost(
+                guild_id=guild_id,
+                sport=data["sport"],
+                era=era_key,
+                question_text=data["question"][:500],
+            ))
+            session.commit()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Slash commands
@@ -231,7 +269,7 @@ class TriviaCog(commands.Cog, name="Trivia"):
             )
 
         # Post the embed directly to the channel where the command was used.
-        await self._send_trivia_embed(interaction.channel, sports)
+        await self._send_trivia_embed(interaction.channel, interaction.guild_id, sports)
 
         # followup.send() is required after defer() — we send a silent ack.
         await interaction.followup.send("Here's your trivia question!", ephemeral=True)

@@ -24,6 +24,13 @@ movie_night_picks     — Per-guild record of which Criterion films have been
 live_game_states      — Per-guild tracking state for each in-progress playoff
                         game. Stores current scores and the index of the last
                         scoring play reported so polls are idempotent.
+trivia_question_posts — Per-guild history of trivia questions Claude has
+                        generated, tagged with the date-derived era they were
+                        written for. Recent questions in the same era are fed
+                        back into the generation prompt as an avoid-list so
+                        the rotation doesn't keep landing on the same
+                        "greatest hits" fact every time that era comes back
+                        around.
 """
 
 import json
@@ -470,4 +477,49 @@ class LiveGameState(Base):
             f"<LiveGameState guild={self.guild_id} game={self.game_id!r} "
             f"sport={self.sport!r} status={self.status!r} "
             f"{self.away_team} {self.away_score}–{self.home_score} {self.home_team}>"
+        )
+
+
+class TriviaQuestionPost(Base):
+    """
+    Records every trivia question Claude has generated and posted in a guild.
+
+    Used to stop the daily era rotation (see utils.claude_client.get_daily_trivia_era)
+    from repeating the same "greatest hits" fact every time an era comes back
+    around — e.g. always landing on the same 1980s statistic every four days.
+    Before generating a new question, the trivia cog looks up recent rows for
+    the same (guild_id, era) pair and passes their question_text into the
+    prompt as an explicit avoid-list.
+
+    No cap on history, same convention as music_posts — old rows are harmless,
+    they just add to the avoid-list context sent to Claude. The cog limits how
+    many recent rows it actually queries and sends (see trivia.py).
+    """
+
+    __tablename__ = "trivia_question_posts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this question was posted in.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # Sport the question was about, as returned by Claude (e.g. "soccer").
+    sport = Column(String(50), nullable=False)
+
+    # Stable era key from get_daily_trivia_era(), e.g. "1970s_1990s" — NOT the
+    # full descriptive era label used in the prompt, so history lookups keep
+    # working even if the prompt wording for an era is edited later.
+    era = Column(String(50), nullable=False, index=True)
+
+    # The generated question text — this is what gets echoed back to Claude
+    # as something to avoid repeating.
+    question_text = Column(String(500), nullable=False)
+
+    # When this question was posted (UTC).
+    posted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"<TriviaQuestionPost guild={self.guild_id} sport={self.sport!r} "
+            f"era={self.era!r} posted={self.posted_at}>"
         )
