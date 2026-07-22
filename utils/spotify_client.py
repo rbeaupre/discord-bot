@@ -195,6 +195,19 @@ def get_new_releases(
     current_year = datetime.now().year
     releases: list[dict] = []
     used_album_ids: set[str] = set()
+    # Spotify sometimes assigns a different album ID to the same release when
+    # it's returned by a different keyword search (e.g. market/edition variants),
+    # so album_id alone isn't a reliable dedup key across genres. Tracking
+    # (artist, normalized title) as well catches the same album showing up
+    # under two different genre fields in one post.
+    used_release_keys: set[tuple[str, str]] = set()
+
+    def _release_key(track: dict) -> tuple[str, str]:
+        artist_name = (
+            track["artists"][0].get("name", "") if track.get("artists") else ""
+        )
+        album_title = track.get("album", {}).get("name", "")
+        return (artist_name.strip().lower(), album_title.strip().lower())
 
     for genre in genres:
         # Search for tracks matching this genre keyword + current year.
@@ -220,7 +233,7 @@ def get_new_releases(
         # Pass 1: ideal match — not too popular, not a repeat, unused album.
         for track in tracks:
             album_id = track.get("album", {}).get("id")
-            if album_id in used_album_ids:
+            if album_id in used_album_ids or _release_key(track) in used_release_keys:
                 continue
             artist_id = track["artists"][0]["id"] if track.get("artists") else None
             if artist_id in exclude_artist_ids:
@@ -248,7 +261,7 @@ def get_new_releases(
             )
             for track in tracks:
                 album_id = track.get("album", {}).get("id")
-                if album_id in used_album_ids:
+                if album_id in used_album_ids or _release_key(track) in used_release_keys:
                     continue
                 artist_id = track["artists"][0]["id"] if track.get("artists") else None
                 if artist_id in exclude_artist_ids:
@@ -272,7 +285,7 @@ def get_new_releases(
             )
             for track in tracks:
                 album_id = track.get("album", {}).get("id")
-                if album_id not in used_album_ids:
+                if album_id not in used_album_ids and _release_key(track) not in used_release_keys:
                     matched = track
                     break
 
@@ -280,6 +293,7 @@ def get_new_releases(
             album_id = matched.get("album", {}).get("id")
             if album_id:
                 used_album_ids.add(album_id)
+            used_release_keys.add(_release_key(matched))
             releases.append(_track_to_release_dict(matched, genre))
 
     return releases
