@@ -24,6 +24,7 @@ Default schedule: every day at 4:00 PM Eastern Time in #sports-chat.
 """
 
 import logging
+import random
 from datetime import datetime
 
 import discord
@@ -50,6 +51,14 @@ _DEFAULT_CHANNEL_NAME = "sports-chat"                       # fallback channel n
 # that actually stand out to the group, and each era only recurs every 4
 # days, so this covers roughly two months of history for that era.
 _AVOID_HISTORY_LIMIT = 15
+
+# How many of the most recently posted sports (regardless of era) to exclude
+# when picking today's sport. Left to Claude, sport choice is heavily biased
+# toward whichever sport is over-represented in its training data (in
+# practice, hockey) rather than actually varying day to day — so we pick the
+# sport ourselves in Python and hand Claude a single mandatory sport instead
+# of a menu to choose from. Excluding the last (n-1) sports posted guarantees
+# every enabled sport appears at least once before any of them repeats.
 
 
 def _job_id(guild_id: int) -> str:
@@ -175,10 +184,14 @@ class TriviaCog(commands.Cog, name="Trivia"):
         history for today's era and passes it to Claude as an avoid-list —
         otherwise Claude tends to regenerate the same "greatest hits" fact
         every time an era comes back around in the rotation (every 4 days).
+        It also picks today's sport itself (see _choose_sport) rather than
+        letting Claude choose from the enabled list, since that self-selection
+        is heavily biased toward one sport in practice.
         After a successful post, records the new question so future posts
         in this era avoid repeating it too.
         """
         era_key, era_label = get_daily_trivia_era()
+        sport = self._choose_sport(guild_id, sports)
 
         with SessionLocal() as session:
             recent = (
@@ -191,7 +204,7 @@ class TriviaCog(commands.Cog, name="Trivia"):
             avoid_questions = [row.question_text for row in recent]
 
         try:
-            data = generate_trivia_question(sports, era_label, avoid_questions)
+            data = generate_trivia_question(sport, era_label, avoid_questions)
         except Exception as exc:
             # Log the full error but show a clean message to Discord users.
             logger.error("Trivia generation failed: %s", exc, exc_info=True)
@@ -199,6 +212,11 @@ class TriviaCog(commands.Cog, name="Trivia"):
                 "Could not generate a trivia question right now. Try `/trivia play` again later."
             )
             return
+
+        # Overwrite defensively — we already chose the sport ourselves, so
+        # don't trust Claude's echoed "sport" field even though the prompt
+        # mandates it match.
+        data["sport"] = sport
 
         embed = discord.Embed(
             title=f"Sports Trivia — {data['sport'].title()}",
@@ -422,6 +440,40 @@ class TriviaCog(commands.Cog, name="Trivia"):
     # ──────────────────────────────────────────────────────────────────────────
     # Helpers
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _choose_sport(self, guild_id: int, sports: list[str]) -> str:
+        """
+        Pick which sport today's question will be about.
+
+        We choose this ourselves instead of handing Claude the full sports
+        list and letting it pick, because left to its own judgment Claude
+        disproportionately favors one sport (in practice, hockey) rather than
+        varying day to day — the same kind of self-selection bias documented
+        for era choice in utils.claude_client.get_daily_trivia_era.
+
+        Looks at the sport(s) used in the most recent posts (across any era)
+        and excludes them from the candidate pool, so every enabled sport
+        gets a turn before any of them repeats. Falls back to the full list
+        if that would exclude everything (e.g. only one sport is enabled).
+        """
+        if len(sports) <= 1:
+            return sports[0]
+
+        with SessionLocal() as session:
+            recent = (
+                session.query(TriviaQuestionPost)
+                .filter_by(guild_id=guild_id)
+                .order_by(TriviaQuestionPost.posted_at.desc())
+                .limit(len(sports) - 1)
+                .all()
+            )
+            recent_sports = {row.sport for row in recent}
+
+        candidates = [s for s in sports if s not in recent_sports]
+        if not candidates:
+            candidates = sports
+
+        return random.choice(candidates)
 
     def _resolve_channel(
         self,

@@ -12,7 +12,7 @@ get_daily_trivia_era()  → tuple[str, str]
     Return the (era_key, era_label) pair for today's date-derived trivia
     era rotation.
 
-generate_trivia_question(sports, era_label, avoid_questions)  → dict
+generate_trivia_question(sport, era_label, avoid_questions)  → dict
     Generate a multiple-choice sports trivia question.
 
 describe_release(artist, title, genre)  → str
@@ -79,7 +79,7 @@ def get_daily_trivia_era() -> tuple[str, str]:
 
 
 def generate_trivia_question(
-    sports: list[str],
+    sport: str,
     era_label: str,
     avoid_questions: list[str] | None = None,
 ) -> dict:
@@ -91,8 +91,13 @@ def generate_trivia_question(
 
     Parameters
     ----------
-    sports : list[str]
-        Sport names Claude can draw from, e.g. ["soccer", "baseball"].
+    sport : str
+        The single sport to write about, e.g. "hockey". The caller (see
+        cogs/trivia.py) chooses this ahead of time by rotating through the
+        guild's enabled sports rather than letting Claude pick — left to its
+        own devices, Claude disproportionately favors one sport (the same
+        self-selection bias documented for eras below), which is why this
+        used to take the full enabled-sports list and let the model choose.
     era_label : str
         The era_label half of get_daily_trivia_era()'s return value — the
         full descriptive era text injected into the prompt as a mandatory
@@ -111,7 +116,9 @@ def generate_trivia_question(
         options     – {"A": "...", "B": "...", "C": "...", "D": "..."}
         correct     – the letter of the correct option ("A"–"D")
         explanation – one or two sentences explaining the answer
-        sport       – which sport the question is about
+        sport       – which sport the question is about (always echoes the
+                      `sport` parameter — the caller overwrites this key
+                      defensively in case Claude alters the wording)
 
     Raises
     ------
@@ -119,8 +126,6 @@ def generate_trivia_question(
         If Claude returns something that cannot be parsed as valid JSON or is
         missing expected keys. The caller should handle this gracefully.
     """
-    sports_str = ", ".join(sports)
-
     # Rendered as its own paragraph right after the era requirement so
     # Claude sees "here's the era, and here's specifically what not to
     # repeat within it" as one coherent instruction.
@@ -134,7 +139,7 @@ AVOID REPEATING — you already asked these questions recently during this same 
 
     prompt = f"""You are a sports trivia expert writing questions for a group of dedicated, knowledgeable fans.
 
-Generate one hard multiple-choice trivia question about one of these sports: {sports_str}.
+SPORT REQUIREMENT — this is mandatory, not optional: generate one hard multiple-choice trivia question about {sport}. Do not write about a different sport.
 
 ERA REQUIREMENT — this is mandatory, not optional: today's era is:
 
@@ -173,7 +178,7 @@ Rules:
 - Exactly one option must be correct.
 - Use real, verifiable facts only — no invented statistics.
 - Make the wrong answer options plausible enough that even knowledgeable fans might second-guess themselves.
-- The "sport" field must be one of: {sports_str}."""
+- The "sport" field must be exactly: {sport}."""
 
     response = _client.messages.create(
         model=_MODEL,
