@@ -78,6 +78,22 @@ def get_daily_trivia_era() -> tuple[str, str]:
     return _ERAS[index]
 
 
+# Internal sport keys (used for config, DB storage, and embed titles) are
+# passed straight into the prompt below, but "football" and "hockey" are
+# globally ambiguous words — most of Claude's training data uses "football"
+# to mean soccer/association football, and "hockey" alone could mean field
+# hockey. Left unclarified, Claude has actually written soccer questions for
+# a "football" request while our code still titled the embed "Football"
+# (using our own internal key, not whatever Claude echoed back). This map
+# gives Claude an unambiguous phrase for the prompt only — internal keys and
+# embed titles are untouched.
+_SPORT_PROMPT_LABELS: dict[str, str] = {
+    "football": "American football (NFL) — not soccer/association football",
+    "soccer": "soccer (association football)",
+    "hockey": "ice hockey (NHL)",
+}
+
+
 def generate_trivia_question(
     sport: str,
     era_label: str,
@@ -137,9 +153,11 @@ def generate_trivia_question(
 AVOID REPEATING — you already asked these questions recently during this same era. Write about a different fact, record, event, or figure than any of them, even if reworded:
 {avoid_block}"""
 
+    sport_label = _SPORT_PROMPT_LABELS.get(sport, sport)
+
     prompt = f"""You are a sports trivia expert writing questions for a group of dedicated, knowledgeable fans.
 
-SPORT REQUIREMENT — this is mandatory, not optional: generate one hard multiple-choice trivia question about {sport}. Do not write about a different sport.
+SPORT REQUIREMENT — this is mandatory, not optional: generate one hard multiple-choice trivia question about {sport_label}. Do not write about a different sport.
 
 ERA REQUIREMENT — this is mandatory, not optional: today's era is:
 
