@@ -22,6 +22,7 @@ Slash commands
 ──────────────
 /movie pick                  — Pick and post a random Criterion film now (admin)
 /movie setup                 — Load/refresh the Criterion catalog from TMDB (admin)
+/movie status                — Show the current configuration (any member)
 /movie config channel <#ch>  — Set the posting channel (admin)
 /movie config day <1–31>     — Set which day of the month to post (admin)
 /movie config time <HH:MM>   — Set posting time in ET (admin)
@@ -446,6 +447,54 @@ class MoviesCog(commands.Cog, name="Movies"):
             f"Criterion catalog updated: **{added}** new films added, "
             f"**{updated}** existing films refreshed "
             f"({added + updated} total in catalog).",
+            ephemeral=True,
+        )
+
+    @movie_group.command(
+        name="status",
+        description="Show the current movie night configuration",
+    )
+    async def movie_status(self, interaction: discord.Interaction) -> None:
+        """
+        Show the configured channel, day of month, post time, and catalog size.
+        Available to all members.
+        """
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="movies")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "Movie night hasn't been configured yet. "
+                    "Use `/movie setup` to get started.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = cfg.channel_id
+            hour, minute, tz = cfg.hour, cfg.minute, cfg.timezone
+            day_of_month = cfg.content_options.get("day_of_month", _DEFAULT_DAY_OF_MONTH)
+
+            catalog_count = session.query(CriterionFilm).count()
+            picks_count = (
+                session.query(MovieNightPick)
+                .filter_by(guild_id=interaction.guild_id)
+                .count()
+            )
+
+        channel_mention = (
+            f"<#{channel_id}>" if channel_id
+            else f"#{_DEFAULT_CHANNEL_NAME} (fallback — set with /movie config channel)"
+        )
+
+        await interaction.response.send_message(
+            f"**Channel:** {channel_mention}\n"
+            f"**Monthly post:** day **{day_of_month}** of each month "
+            f"at {hour:02d}:{minute:02d} ({tz})\n"
+            f"**Catalog:** {catalog_count} film(s) loaded — "
+            f"{picks_count} picked so far this rotation",
             ephemeral=True,
         )
 

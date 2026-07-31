@@ -18,6 +18,7 @@ Slash commands
 /birthday set    <month> <day>    — Register your own birthday
 /birthday remove                  — Remove your birthday registration
 /birthday list                    — See all registered birthdays in this server
+/birthday status                  — Show the current configuration
 /birthday config channel <#ch>   — Set the announcement channel (admin)
 /birthday config time    <HH:MM> — Set the daily check time in ET (admin)
 
@@ -360,6 +361,42 @@ class BirthdayCog(commands.Cog, name="Birthdays"):
         )
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @birthday_group.command(
+        name="status",
+        description="Show the current birthday announcement configuration",
+    )
+    async def birthday_status(self, interaction: discord.Interaction) -> None:
+        """
+        Show the configured announcement channel and daily check time.
+        Available to all members.
+        """
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="birthday")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "Birthdays haven't been configured yet. Use `/birthday set` to get started.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = cfg.channel_id
+            hour, minute, tz = cfg.hour, cfg.minute, cfg.timezone
+
+        channel_mention = (
+            f"<#{channel_id}>" if channel_id
+            else f"#{_DEFAULT_CHANNEL_NAME} (fallback — set with /birthday config channel)"
+        )
+
+        await interaction.response.send_message(
+            f"**Channel:** {channel_mention}\n"
+            f"**Daily check time:** {hour:02d}:{minute:02d} ({tz})",
+            ephemeral=True,
+        )
 
     # ── Admin config subgroup: /birthday config ───────────────────────────────
 

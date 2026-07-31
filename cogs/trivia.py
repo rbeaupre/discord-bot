@@ -16,6 +16,7 @@ How it works
 Slash commands
 ──────────────
 /trivia play                          — Post a question right now (any member)
+/trivia status                        — Show the current configuration (any member)
 /trivia config channel  <#channel>   — Set posting channel (admin)
 /trivia config time     <HH:MM>      — Set daily post time in ET (admin)
 /trivia config sports   <booleans>   — Toggle which sports are included (admin)
@@ -291,6 +292,44 @@ class TriviaCog(commands.Cog, name="Trivia"):
 
         # followup.send() is required after defer() — we send a silent ack.
         await interaction.followup.send("Here's your trivia question!", ephemeral=True)
+
+    @trivia_group.command(
+        name="status",
+        description="Show the current trivia configuration",
+    )
+    async def trivia_status(self, interaction: discord.Interaction) -> None:
+        """
+        Show the configured channel, daily post time, and enabled sports.
+        Available to all members.
+        """
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="trivia")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "Trivia hasn't been configured yet. Use `/trivia play` to get started.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = cfg.channel_id
+            hour, minute, tz = cfg.hour, cfg.minute, cfg.timezone
+            sports = cfg.content_options.get("sports", _DEFAULT_SPORTS)
+
+        channel_mention = (
+            f"<#{channel_id}>" if channel_id
+            else f"#{_DEFAULT_CHANNEL_NAME} (fallback — set with /trivia config channel)"
+        )
+
+        await interaction.response.send_message(
+            f"**Channel:** {channel_mention}\n"
+            f"**Daily post time:** {hour:02d}:{minute:02d} ({tz})\n"
+            f"**Sports:** {', '.join(sports)}",
+            ephemeral=True,
+        )
 
     # ── Admin config subgroup: /trivia config ─────────────────────────────────
 

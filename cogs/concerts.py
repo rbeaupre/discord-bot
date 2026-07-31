@@ -26,6 +26,7 @@ Slash commands
 /concert list                      — Show first 20 watchlist artists (anyone)
 /concert check                     — Run the concert check right now (admin)
 /concert import <playlist_url>     — Bulk-add all artists from a Spotify playlist (admin)
+/concert status                    — Show the current configuration (anyone)
 /concert config channel <#ch>      — Set the alert channel (admin)
 /concert config day <weekday>      — Set check day of week (admin)
 /concert config time <HH:MM>       — Set check time in ET (admin)
@@ -535,6 +536,54 @@ class ConcertsCog(commands.Cog, name="Concerts"):
         await interaction.followup.send(
             f"Done — **{added}** new artists added to the watchlist "
             f"({skipped} already present).",
+            ephemeral=True,
+        )
+
+    @concert_group.command(
+        name="status",
+        description="Show the current concert alert configuration",
+    )
+    async def concert_status(self, interaction: discord.Interaction) -> None:
+        """
+        Show the configured channel, check schedule, cities, and watchlist size.
+        Available to all members.
+        """
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="concerts")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "Concert alerts haven't been configured yet. "
+                    "Use `/concert check` to get started.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = cfg.channel_id
+            hour, minute, tz = cfg.hour, cfg.minute, cfg.timezone
+            day = cfg.day_of_week or _DEFAULT_DAY
+            cities = cfg.content_options.get("cities", _DEFAULT_CITIES)
+
+            watchlist_count = (
+                session.query(ArtistWatchlist)
+                .filter_by(guild_id=interaction.guild_id)
+                .count()
+            )
+
+        channel_mention = (
+            f"<#{channel_id}>" if channel_id
+            else f"#{_DEFAULT_CHANNEL_NAME} (fallback — set with /concert config channel)"
+        )
+
+        await interaction.response.send_message(
+            f"**Channel:** {channel_mention}\n"
+            f"**Check schedule:** bi-weekly on **{day.capitalize()}** "
+            f"at {hour:02d}:{minute:02d} ({tz})\n"
+            f"**Cities:** {', '.join(cities)}\n"
+            f"**Watchlist:** {watchlist_count} artist(s) — use `/concert list` to view",
             ephemeral=True,
         )
 

@@ -21,6 +21,7 @@ How it works
 Slash commands
 ──────────────
 /album post                    — Post the latest Pitchfork Best New Album now (admin)
+/album status                  — Show the current configuration (any member)
 /album config channel <#ch>    — Set the posting channel (admin)
 /album config day     <1–31>   — Set which day of the month to post (admin)
 /album config time    <HH:MM>  — Set posting time in ET (admin)
@@ -318,6 +319,45 @@ class AlbumReviewsCog(commands.Cog, name="AlbumReviews"):
 
         await self._send_review_embed(interaction.channel, interaction.guild_id, review_data)
         await interaction.followup.send("Album review posted!", ephemeral=True)
+
+    @album_group.command(
+        name="status",
+        description="Show the current album review configuration",
+    )
+    async def album_status(self, interaction: discord.Interaction) -> None:
+        """
+        Show the configured channel, day of month, and post time.
+        Available to all members.
+        """
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="album_review")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "Album reviews haven't been configured yet. "
+                    "Use `/album post` to get started.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = cfg.channel_id
+            hour, minute, tz = cfg.hour, cfg.minute, cfg.timezone
+            day_of_month = cfg.content_options.get("day_of_month", _DEFAULT_DAY_OF_MONTH)
+
+        channel_mention = (
+            f"<#{channel_id}>" if channel_id
+            else f"#{_DEFAULT_CHANNEL_NAME} (fallback — set with /album config channel)"
+        )
+
+        await interaction.response.send_message(
+            f"**Channel:** {channel_mention}\n"
+            f"**Monthly post:** day **{day_of_month}** of each month "
+            f"at {hour:02d}:{minute:02d} ({tz})",
+            ephemeral=True,
+        )
 
     # ── Admin config subgroup: /album config ──────────────────────────────────
 
