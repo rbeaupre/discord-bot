@@ -32,7 +32,7 @@ What works with Client Credentials:
 
 Public functions
 ----------------
-get_new_releases(genres, exclude_artist_ids, max_popularity)  → list[dict]
+get_new_releases(genres, exclude_artist_ids, exclude_release_keys, max_popularity)  → list[dict]
 find_album_url(artist, album)                                  → str | None
 get_playlist_artists(playlist_url)                             → list[str]
 """
@@ -130,6 +130,24 @@ def _get_oauth_client() -> spotipy.Spotify:
 # 1 and 2 both failed and pass 3 (no filter) fired unconditionally every time.
 _DEFAULT_MAX_POPULARITY = 75
 
+# Spotify caps search results at 10 per page for this app's restricted tier
+# (see the module docstring — limit>10 fails). We page through results with
+# `offset` instead of raising the limit.
+_SEARCH_PAGE_LIMIT = 10
+
+# How far to page within a single year before giving up on it. 4 pages of 10
+# (offsets 0/10/20/30) covers the 40 most relevant results for the query —
+# beyond that, relevance has usually dropped off enough that paging further
+# rarely surfaces anything new.
+_MAX_SEARCH_OFFSET = 30
+
+# How many years to step backward (current_year, current_year-1, ...) before
+# giving up on a genre entirely. The keyword+year search tends to return
+# nearly the same handful of relevant tracks every week, so once every result
+# for the current year has already been posted, older years are the only
+# way to find genuinely fresh artists.
+_MAX_YEARS_BACK = 3
+
 
 def _track_to_release_dict(track: dict, genre: str) -> dict:
     """
@@ -171,26 +189,43 @@ def _track_to_release_dict(track: dict, genre: str) -> dict:
 def get_new_releases(
     genres: list[str],
     exclude_artist_ids: list[str] | None = None,
+    exclude_release_keys: list[tuple[str, str]] | None = None,
     max_popularity: int = _DEFAULT_MAX_POPULARITY,
 ) -> list[dict]:
     """
     Fetch one new release per genre, filtering for less well-known artists and
-    skipping artists that have been posted in previous weeks.
+    skipping artists/releases that have ever been posted before.
+
+    The keyword+year search Spotify's restricted app tier allows us to use
+    (see module docstring) tends to return nearly the same handful of
+    relevant tracks for a given query every week, so a single 10-result page
+    for the current year is often entirely artists we've already posted. To
+    find something genuinely fresh, this pages through additional result
+    pages (via `offset`) and, if still nothing turns up, steps back through
+    previous years (`year:YYYY`) — see _MAX_SEARCH_OFFSET / _MAX_YEARS_BACK.
 
     Parameters
     ----------
-    genres             : Genre labels to search for, e.g. ["rock", "indie", "electronic"].
-    exclude_artist_ids : Spotify artist IDs to skip (previously posted artists).
-    max_popularity     : Maximum track popularity score (0–100). Tracks above this
-                         are skipped in the first pass. Default 60.
+    genres               : Genre labels to search for, e.g. ["rock", "indie", "electronic"].
+    exclude_artist_ids   : Spotify artist IDs to skip — should be every artist
+                           ever posted for this guild (see database.models.MusicPost),
+                           not just a recent window, so the same act never repeats.
+    exclude_release_keys : (artist_name, album_title) pairs to skip, both
+                           lowercased/stripped, matching _release_key() below.
+                           Same all-time scope as exclude_artist_ids — an extra
+                           guard against the same album resurfacing under a
+                           different Spotify artist ID.
+    max_popularity        : Maximum track popularity score (0–100). Tracks above this
+                            are skipped in the first pass. Default 75.
 
     Returns
     -------
     list[dict]
-        One release dict per genre. May be shorter than genres if a search fails.
+        One release dict per genre. May be shorter than genres if a search
+        fails or no fresh artist can be found within the search budget.
     """
-    if exclude_artist_ids is None:
-        exclude_artist_ids = []
+    exclude_artist_ids = set(exclude_artist_ids or [])
+    exclude_release_keys = set(exclude_release_keys or [])
 
     current_year = datetime.now().year
     releases: list[dict] = []
@@ -209,92 +244,88 @@ def get_new_releases(
         album_title = track.get("album", {}).get("name", "")
         return (artist_name.strip().lower(), album_title.strip().lower())
 
+    def _is_fresh(track: dict) -> bool:
+        album_id = track.get("album", {}).get("id")
+        if album_id in used_album_ids:
+            return False
+        key = _release_key(track)
+        if key in used_release_keys or key in exclude_release_keys:
+            return False
+        artist_id = track["artists"][0]["id"] if track.get("artists") else None
+        if artist_id in exclude_artist_ids:
+            return False
+        return True
+
     for genre in genres:
-        # Search for tracks matching this genre keyword + current year.
-        # We use keyword search (not the broken genre: field filter) — this
-        # matches the genre word against track/artist/album metadata.
-        try:
-            result = _sp.search(
-                q=f"{genre} year:{current_year}",
-                type="track",
-                limit=10,
-            )
-            tracks = result["tracks"]["items"]
-        except spotipy.SpotifyException as exc:
-            logger.error("Spotify search failed for genre '%s': %s", genre, exc)
-            continue
-
-        if not tracks:
-            logger.warning("No Spotify results for genre '%s'", genre)
-            continue
-
         matched = None
+        # Every fresh (not-yet-posted) track we see while paging, regardless
+        # of popularity — reused for the relaxed-popularity fallback below so
+        # we don't have to re-hit the API for it.
+        fresh_candidates: list[dict] = []
 
-        # Pass 1: ideal match — not too popular, not a repeat, unused album.
-        for track in tracks:
-            album_id = track.get("album", {}).get("id")
-            if album_id in used_album_ids or _release_key(track) in used_release_keys:
-                continue
-            artist_id = track["artists"][0]["id"] if track.get("artists") else None
-            if artist_id in exclude_artist_ids:
-                continue
-            if track.get("popularity", 100) > max_popularity:
-                continue
-            matched = track
-            logger.debug(
-                "Genre '%s' match: %s by %s (popularity %d)",
-                genre,
-                track.get("album", {}).get("name"),
-                track["artists"][0]["name"] if track.get("artists") else "?",
-                track.get("popularity", 0),
-            )
-            break
-
-        # Pass 2: relax the popularity cap but keep the exclusion filter.
-        # This is the more important fallback — a fresh (not yet posted) artist
-        # is more valuable than a lower popularity score. When all 10 returned
-        # tracks exceed max_popularity, this pass finds a new artist instead of
-        # falling all the way through to pass 3 and repeating the same track.
-        if not matched:
-            logger.warning(
-                "No low-popularity fresh match for '%s' — relaxing popularity cap", genre
-            )
-            for track in tracks:
-                album_id = track.get("album", {}).get("id")
-                if album_id in used_album_ids or _release_key(track) in used_release_keys:
-                    continue
-                artist_id = track["artists"][0]["id"] if track.get("artists") else None
-                if artist_id in exclude_artist_ids:
-                    continue
-                matched = track
-                logger.debug(
-                    "Genre '%s' pass-2 match: %s by %s (popularity %d — above cap)",
-                    genre,
-                    track.get("album", {}).get("name"),
-                    track["artists"][0]["name"] if track.get("artists") else "?",
-                    track.get("popularity", 0),
-                )
-                break
-
-        # Pass 3: absolute last resort — all non-excluded artists have been
-        # exhausted. Take the first unused track regardless of repeat history.
-        if not matched:
-            logger.warning(
-                "No unposted match for '%s' — all available artists already posted, "
-                "using first available track", genre
-            )
-            for track in tracks:
-                album_id = track.get("album", {}).get("id")
-                if album_id not in used_album_ids and _release_key(track) not in used_release_keys:
-                    matched = track
+        for year in range(current_year, current_year - _MAX_YEARS_BACK - 1, -1):
+            for offset in range(0, _MAX_SEARCH_OFFSET + 1, _SEARCH_PAGE_LIMIT):
+                # Search for tracks matching this genre keyword + year. We use
+                # keyword search (not the broken genre: field filter) — this
+                # matches the genre word against track/artist/album metadata.
+                try:
+                    result = _sp.search(
+                        q=f"{genre} year:{year}",
+                        type="track",
+                        limit=_SEARCH_PAGE_LIMIT,
+                        offset=offset,
+                    )
+                    tracks = result["tracks"]["items"]
+                except spotipy.SpotifyException as exc:
+                    logger.error(
+                        "Spotify search failed for genre '%s' year %d offset %d: %s",
+                        genre, year, offset, exc,
+                    )
                     break
 
-        if matched:
-            album_id = matched.get("album", {}).get("id")
-            if album_id:
-                used_album_ids.add(album_id)
-            used_release_keys.add(_release_key(matched))
-            releases.append(_track_to_release_dict(matched, genre))
+                if not tracks:
+                    # No more results at this offset for this year — paging
+                    # further won't help, move on to the previous year.
+                    break
+
+                for track in tracks:
+                    if not _is_fresh(track):
+                        continue
+                    fresh_candidates.append(track)
+                    if track.get("popularity", 100) <= max_popularity:
+                        matched = track
+                        break
+
+                if matched:
+                    break
+            if matched:
+                break
+
+        # No ideal (low-popularity, fresh) match anywhere in the search
+        # budget — fall back to the most popular fresh candidate we saw while
+        # paging, rather than making more API calls. A fresh artist above the
+        # popularity cap is still better than no release for this genre.
+        if not matched and fresh_candidates:
+            matched = fresh_candidates[0]
+            logger.debug(
+                "Genre '%s' — using above-popularity-cap fresh match: %s by %s",
+                genre,
+                matched.get("album", {}).get("name"),
+                matched["artists"][0]["name"] if matched.get("artists") else "?",
+            )
+
+        if not matched:
+            logger.warning(
+                "No unposted match for '%s' after searching %d year(s) back — "
+                "skipping this genre this week", genre, _MAX_YEARS_BACK,
+            )
+            continue
+
+        album_id = matched.get("album", {}).get("id")
+        if album_id:
+            used_album_ids.add(album_id)
+        used_release_keys.add(_release_key(matched))
+        releases.append(_track_to_release_dict(matched, genre))
 
     return releases
 

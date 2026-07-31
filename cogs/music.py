@@ -17,6 +17,7 @@ How it works
 Slash commands
 ──────────────
 /music releases                        — Post new releases right now (any member)
+/music status                          — Show the current configuration (any member)
 /music config channel  <#channel>      — Set posting channel (admin)
 /music config day      <weekday>       — Set which day of the week (admin)
 /music config time     <HH:MM>        — Set posting time in ET (admin)
@@ -26,7 +27,7 @@ Default schedule: every Monday at 10:00 AM Eastern Time in #new_releases.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import discord
 from apscheduler.triggers.cron import CronTrigger
@@ -51,14 +52,26 @@ _DEFAULT_CHANNEL_NAME = "new_releases"
 # Valid weekday abbreviations accepted by APScheduler's CronTrigger.
 _VALID_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
-# How far back to look when building the artist exclusion list.
-# Artists posted within this window won't be featured again.
-_EXCLUSION_WINDOW_DAYS = 90  # 3 months
 
+def _load_exclusions(session, guild_id: int) -> tuple[list[str], list[tuple[str, str]]]:
+    """
+    Load every artist and (artist, album) pair ever posted for this guild.
 
-def _exclusion_cutoff() -> datetime:
-    """Return the earliest posted_at timestamp still within the exclusion window."""
-    return datetime.utcnow() - timedelta(days=_EXCLUSION_WINDOW_DAYS)
+    MusicPost's docstring documents this as an all-time exclusion — "artists
+    are excluded indefinitely" — so, unlike some other dedup tables in this
+    project, there is no recency window here: an artist that was featured
+    once is never eligible again unless its music_posts row is deleted.
+    Passed straight through to spotify_client.get_new_releases(), which pages
+    deeper into the Spotify catalog (more result pages, older years) as
+    needed to find something that isn't in this list.
+    """
+    rows = session.query(MusicPost).filter_by(guild_id=guild_id).all()
+    artist_ids = [row.artist_id for row in rows]
+    release_keys = [
+        (row.artist_name.strip().lower(), row.release_title.strip().lower())
+        for row in rows
+    ]
+    return artist_ids, release_keys
 
 
 def _job_id(guild_id: int) -> str:
@@ -152,17 +165,7 @@ class MusicCog(commands.Cog, name="Music"):
                 cfg.content_options.get("genres", _DEFAULT_GENRES)
                 if cfg else _DEFAULT_GENRES
             )
-            # Load artist IDs posted in the last 3 months — artists outside
-            # that window are allowed to cycle back into the rotation.
-            posted_artist_ids = [
-                row.artist_id
-                for row in session.query(MusicPost)
-                .filter(
-                    MusicPost.guild_id == guild_id,
-                    MusicPost.posted_at >= _exclusion_cutoff(),
-                )
-                .all()
-            ]
+            posted_artist_ids, posted_release_keys = _load_exclusions(session, guild_id)
 
         channel = self._resolve_channel(guild, channel_id, _DEFAULT_CHANNEL_NAME)
         if channel is None:
@@ -172,7 +175,9 @@ class MusicCog(commands.Cog, name="Music"):
             )
             return
 
-        releases = await self._send_releases_embed(channel, genres, posted_artist_ids)
+        releases = await self._send_releases_embed(
+            channel, genres, posted_artist_ids, posted_release_keys
+        )
 
         # Record what we just posted so these artists are excluded next time.
         if releases:
@@ -186,7 +191,8 @@ class MusicCog(commands.Cog, name="Music"):
         self,
         channel: discord.TextChannel,
         genres: list[str],
-        recent_artist_ids: list[str] | None = None,
+        posted_artist_ids: list[str] | None = None,
+        posted_release_keys: list[tuple[str, str]] | None = None,
     ) -> list[dict]:
         """
         Fetch new releases from Spotify, generate Claude blurbs, and post
@@ -194,9 +200,13 @@ class MusicCog(commands.Cog, name="Music"):
         the artist, album, Spotify link, and a Claude-written description.
 
         Returns the list of releases that were posted so the caller can save
-        the artist IDs to the recent-history list in the database.
+        the artist IDs to the all-time history list in the database.
         """
-        releases = get_new_releases(genres, exclude_artist_ids=recent_artist_ids or [])
+        releases = get_new_releases(
+            genres,
+            exclude_artist_ids=posted_artist_ids or [],
+            exclude_release_keys=posted_release_keys or [],
+        )
 
         if not releases:
             await channel.send(
@@ -275,24 +285,58 @@ class MusicCog(commands.Cog, name="Music"):
                 cfg.content_options.get("genres", _DEFAULT_GENRES)
                 if cfg else _DEFAULT_GENRES
             )
-            posted_artist_ids = [
-                row.artist_id
-                for row in session.query(MusicPost)
-                .filter(
-                    MusicPost.guild_id == interaction.guild_id,
-                    MusicPost.posted_at >= _exclusion_cutoff(),
-                )
-                .all()
-            ]
+            posted_artist_ids, posted_release_keys = _load_exclusions(
+                session, interaction.guild_id
+            )
 
         releases = await self._send_releases_embed(
-            interaction.channel, genres, posted_artist_ids
+            interaction.channel, genres, posted_artist_ids, posted_release_keys
         )
 
         if releases:
             await self._record_posted_artists(interaction.guild_id, releases)
 
         await interaction.followup.send("New releases posted!", ephemeral=True)
+
+    @music_group.command(
+        name="status",
+        description="Show the current new-releases configuration",
+    )
+    async def music_status(self, interaction: discord.Interaction) -> None:
+        """
+        Show the configured channel, posting day/time, and genres.
+        Available to all members.
+        """
+        with SessionLocal() as session:
+            cfg = (
+                session.query(ScheduleConfig)
+                .filter_by(guild_id=interaction.guild_id, feature="music")
+                .first()
+            )
+            if cfg is None:
+                await interaction.response.send_message(
+                    "Music releases haven't been configured yet. "
+                    "Use `/music releases` to get started.",
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = cfg.channel_id
+            hour, minute, tz = cfg.hour, cfg.minute, cfg.timezone
+            day = cfg.day_of_week or _DEFAULT_DAY
+            genres = cfg.content_options.get("genres", _DEFAULT_GENRES)
+
+        channel_mention = (
+            f"<#{channel_id}>" if channel_id
+            else f"#{_DEFAULT_CHANNEL_NAME} (fallback — set with /music config channel)"
+        )
+
+        await interaction.response.send_message(
+            f"**Channel:** {channel_mention}\n"
+            f"**Weekly post:** every **{day.capitalize()}** at {hour:02d}:{minute:02d} ({tz})\n"
+            f"**Genres:** {', '.join(genres)}",
+            ephemeral=True,
+        )
 
     # ── Admin config subgroup: /music config ──────────────────────────────────
 
