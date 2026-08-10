@@ -11,7 +11,8 @@ What happens at startup
 2. DiscordBot.__init__() creates the APScheduler instance.
 3. setup_hook() (called before the bot connects to Discord):
       a. Starts the APScheduler so it's running before cogs register their jobs.
-      b. Loads all three feature cogs (trivia, music, birthdays).
+      b. Loads all feature cogs (trivia, music, birthdays, album reviews,
+         concerts, movies, sports scores, chat).
       c. Syncs slash commands to Discord — instantly if DEV_GUILD_ID is set,
          otherwise globally (takes up to 1 hour to propagate).
 4. The bot connects and on_ready() fires in each cog, which registers
@@ -51,9 +52,14 @@ class DiscordBot(commands.Bot):
     def __init__(self) -> None:
         # Intents declare which Discord events the bot receives.
         # members=True is required to fetch server member lists (for birthday
-        # lookups and @mentions). It must also be enabled in the Developer Portal.
+        # lookups and @mentions). message_content is required for cogs/chat.py
+        # to read the text of a message that @mentions the bot — without it,
+        # message.content arrives empty for any message the bot didn't send
+        # itself. Both are privileged intents and must also be enabled in the
+        # Developer Portal (Bot → Privileged Gateway Intents).
         intents = discord.Intents.default()
         intents.members = True
+        intents.message_content = True
 
         super().__init__(
             command_prefix="!",     # prefix for legacy text commands (mostly unused)
@@ -92,6 +98,7 @@ class DiscordBot(commands.Bot):
             "cogs.concerts",
             "cogs.movies",
             "cogs.sports_scores",
+            "cogs.chat",
         ]:
             try:
                 await self.load_extension(cog_path)
