@@ -1,9 +1,11 @@
 """
 cogs/sports_scores.py
 ─────────────────────
-Live playoff sports score updates cog. Polls the ESPN public API on a per-sport
-cadence during playoff season and posts Discord embeds for game starts, scoring
-plays, and final scores in the configured channel.
+Live sports score updates cog. Polls the ESPN public API on a per-sport
+cadence and posts Discord embeds for game starts, scoring plays, and final
+scores in the configured channel. NHL, MLB, and soccer are playoff/tournament
+-only; NFL also covers the regular season — see get_live_nfl_games() in
+utils/sports_client.py for the one-game-per-day selection rule.
 
 How it works
 ────────────
@@ -12,7 +14,7 @@ How it works
    NHL, MLB, and soccer poll every 1 minute. All jobs are independent so one
    sport's cadence doesn't affect others.
 2. Each poll is a no-op when the feature is disabled, the sport is toggled off,
-   or no playoff games are live — off-season overhead is negligible (one DB read).
+   or no games are live — off-season overhead is negligible (one DB read).
 3. The live_game_states table tracks per-game state (scores, last play reported,
    start-announced flag) so alerts are correct across bot restarts and polls.
 4. Each sport (NFL, NHL, MLB, soccer) can be toggled independently.
@@ -43,6 +45,7 @@ from database.models import LiveGameState, ScheduleConfig
 from utils.sports_client import (
     ACTIVE_STATUSES,
     FINAL_STATUSES,
+    get_live_nfl_games,
     get_live_playoff_games,
 )
 
@@ -160,6 +163,28 @@ _ANNOUNCE_START_STATUSES: frozenset[str] = frozenset({
 })
 
 
+def _season_footer(sport: str, game: dict) -> str:
+    """
+    Build the embed footer text, labeling whether the game is a playoff game
+    or a regular-season game.
+
+    game["is_playoff"] is set by utils.sports_client for every game dict
+    freshly fetched from ESPN (True from get_live_playoff_games(), True or
+    False from get_live_nfl_games()). It's absent on the synthetic dict
+    _poll_scores builds from stored LiveGameState columns when a game
+    disappears from the feed mid-poll — that dict only carries the columns
+    LiveGameState persists, which doesn't include is_playoff. In that case
+    we fall back to the bare sport label rather than guessing.
+    """
+    label = _SPORT_LABELS.get(sport, sport.upper())
+    is_playoff = game.get("is_playoff")
+    if is_playoff is True:
+        return f"{label} · Playoff"
+    if is_playoff is False:
+        return f"{label} · Regular Season"
+    return label
+
+
 def _job_id(guild_id: int, sport: str) -> str:
     """
     Return the stable APScheduler job ID for a guild + sport polling job.
@@ -172,7 +197,11 @@ def _job_id(guild_id: int, sport: str) -> str:
 
 class SportsScoresCog(commands.Cog, name="SportsScores"):
     """
-    Cog that polls ESPN for live playoff game updates and posts them to Discord.
+    Cog that polls ESPN for live game updates and posts them to Discord.
+
+    NHL, MLB, and soccer are tracked for playoff/tournament games only. NFL
+    also tracks the regular season, one game per day (see get_live_nfl_games()
+    in utils/sports_client.py).
 
     One APScheduler IntervalTrigger job is registered per sport per guild, each
     on its own cadence: NFL at 15-second intervals (to catch TD + PAT as separate
@@ -264,8 +293,10 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         """
         Main polling callback — called by APScheduler on a per-sport cadence.
 
-        Checks ESPN for live playoff games for a single sport, compares against
-        the stored live_game_states rows for this guild + sport, and posts embeds:
+        Checks ESPN for live games for a single sport (playoff-only for NHL/
+        MLB/soccer; playoffs plus the selected regular-season game for NFL —
+        see get_live_nfl_games()), compares against the stored live_game_states
+        rows for this guild + sport, and posts embeds:
           - A game starting (first time we detect it as in_progress)
           - Each new scoring play since the previous poll
           - A final score when the game ends (STATUS_FINAL or disappears from feed)
@@ -321,8 +352,15 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             return
 
         # ── Fetch live games from ESPN for this sport ─────────────────────────
+        # NFL uses get_live_nfl_games() instead of get_live_playoff_games(),
+        # since it also covers the regular season (one game per day — see
+        # that function's docstring for the selection rule). NHL, MLB, and
+        # soccer remain playoff/tournament-only.
         try:
-            live_games_raw = get_live_playoff_games(sport)
+            if sport == "nfl":
+                live_games_raw = get_live_nfl_games()
+            else:
+                live_games_raw = get_live_playoff_games(sport)
         except Exception as exc:
             logger.warning("ESPN API error for sport %r (guild %d): %s", sport, guild_id, exc)
             return
@@ -633,7 +671,6 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         """
         sport = game["sport"]
         emoji = _SPORT_EMOJI.get(sport, "")
-        label = _SPORT_LABELS.get(sport, sport.upper())
 
         embed = discord.Embed(
             title=f"{emoji} Game Starting",
@@ -641,7 +678,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text=f"{label} · Playoff")
+        embed.set_footer(text=_season_footer(sport, game))
         await channel.send(embed=embed)
 
     async def _post_scoring_play(
@@ -726,7 +763,6 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         game    : Current game state dict from get_live_playoff_games().
         """
         sport = game.get("sport", "")
-        label = _SPORT_LABELS.get(sport, sport.upper())
         emoji = _SPORT_EMOJI.get(sport, "")
 
         score_line = (
@@ -740,7 +776,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_footer(text=f"{label} · Playoff")
+        embed.set_footer(text=_season_footer(sport, game))
         await channel.send(embed=embed)
 
     async def _post_final_score(
@@ -766,7 +802,6 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                   away_penalty_score, display_clock, and period.
         """
         sport = game.get("sport", "")
-        label = _SPORT_LABELS.get(sport, sport.upper())
         status_name = game.get("status_name", "")
 
         home = game["home_team"]
@@ -842,7 +877,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             time_value = f"{time_label} · {display_clock}" if time_label else display_clock
             embed.add_field(name="Time", value=time_value, inline=True)
 
-        embed.set_footer(text=f"{label} · Playoff")
+        embed.set_footer(text=_season_footer(sport, game))
         await channel.send(embed=embed)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -945,7 +980,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
     )
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(
-        nfl="True to enable NFL playoff alerts, False to disable",
+        nfl="True to enable NFL alerts (playoffs + one regular-season game per day), False to disable",
         nhl="True to enable NHL playoff alerts, False to disable",
         mlb="True to enable MLB playoff alerts, False to disable",
         soccer="True to enable soccer tournament alerts, False to disable",

@@ -21,21 +21,35 @@ Public functions
 get_live_playoff_games(sport)       → list[dict]
     Return all in-progress or just-finished playoff games for one sport.
 
+get_live_nfl_games()                → list[dict]
+    NFL-specific variant that also covers the regular season: returns every
+    live/just-finished playoff game (same as get_live_playoff_games("nfl"))
+    plus, during the regular season, the single game selected for "today"
+    (Eastern time) — the day's only game, or the latest-kickoff ("primetime")
+    game when several are on. Fetches the NFL scoreboard once rather than
+    querying it twice, since it's polled every 15 seconds.
+
 get_all_live_playoff_games(sports)  → dict[str, list[dict]]
     Call get_live_playoff_games for each sport, suppressing per-sport
     errors so one failing endpoint doesn't block the others.
 """
 
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 
 logger = logging.getLogger(__name__)
 
+_EASTERN = ZoneInfo("America/New_York")
+
 _BASE_URL = "https://site.api.espn.com/apis/site/v2/sports"
 _REQUEST_TIMEOUT = 15
 
-# ESPN season type "3" identifies postseason / playoffs for NFL, NHL, and MLB.
+# ESPN season type IDs for NFL, NHL, and MLB: "2" is the regular season,
+# "3" is postseason / playoffs.
+_REGULAR_SEASON_TYPE_ID = "2"
 _POSTSEASON_TYPE_ID = "3"
 
 # Scoreboard URL(s) for each supported sport. Soccer has multiple tournament
@@ -343,7 +357,94 @@ def get_live_playoff_games(sport: str) -> list[dict]:
             if parsed["game_id"] in seen_ids:
                 continue
 
+            # Every game returned by this function passed the _is_playoff
+            # check above, so it's always a playoff/tournament game. Recorded
+            # on the dict so embed builders can label it correctly instead of
+            # assuming every tracked game is a playoff game (NFL regular
+            # season games flow through get_live_nfl_games() instead, and are
+            # marked is_playoff=False there).
+            parsed["is_playoff"] = True
+
             seen_ids.add(parsed["game_id"])
+            games.append(parsed)
+
+    return games
+
+
+def get_live_nfl_games() -> list[dict]:
+    """
+    Return the NFL games that should currently be tracked: every live or
+    just-finished playoff game, plus — during the regular season — the one
+    game selected for "today" (Eastern time).
+
+    Regular season selection: unlike playoffs (where every concurrent game is
+    tracked), only one regular-season game is tracked per day. If today has
+    exactly one NFL regular-season game, that's the target. If it has more
+    than one (Sunday's slate, a late-season Saturday tripleheader, or the
+    rare international Wed/Thu/Mon doubleheader), the target is whichever has
+    the latest scheduled kickoff — the "primetime" game.
+
+    The target is chosen from the full day's schedule, including games that
+    haven't kicked off yet, so an early game going live first is never
+    mistaken for the target just because it started sooner. Once chosen, it's
+    only included in the result once it has actually started (state != "pre")
+    — same contract as get_live_playoff_games().
+
+    Fetches the NFL scoreboard exactly once — playoff and regular-season
+    events share the same endpoint response, so this avoids the extra ESPN
+    request that calling get_live_playoff_games("nfl") and a separate
+    regular-season lookup back to back would cost every 15-second poll.
+
+    Returns
+    -------
+    list[dict]
+        Game dicts as returned by _parse_event(), each with an added
+        "is_playoff" bool. Includes every live/finished playoff game plus,
+        at most, one regular-season game.
+
+    Raises
+    ------
+    SportsAPIError
+        If the request to the ESPN API fails.
+    """
+    data = _fetch_scoreboard(_SPORT_ENDPOINTS["nfl"][0])
+    today = datetime.now(_EASTERN).date()
+
+    games: list[dict] = []
+    seen_ids: set[str] = set()
+    regular_season_candidates: list[tuple[datetime, dict]] = []
+
+    for event in data.get("events", []):
+        season_type = event.get("season", {}).get("type", {})
+        type_id = str(season_type.get("id", ""))
+
+        if type_id == _POSTSEASON_TYPE_ID:
+            parsed = _parse_event(event, "nfl")
+            if parsed["state"] == "pre" or parsed["game_id"] in seen_ids:
+                continue
+            parsed["is_playoff"] = True
+            seen_ids.add(parsed["game_id"])
+            games.append(parsed)
+
+        elif type_id == _REGULAR_SEASON_TYPE_ID:
+            # Collect every regular-season game scheduled for today (any
+            # state) so the primetime pick considers games that haven't
+            # kicked off yet, not just ones already live.
+            raw_date = event.get("date", "")
+            try:
+                start_time = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if start_time.astimezone(_EASTERN).date() == today:
+                regular_season_candidates.append((start_time, event))
+
+    if regular_season_candidates:
+        # Latest kickoff wins — the only candidate when there's just one
+        # game today, the primetime game when there are several.
+        _, target_event = max(regular_season_candidates, key=lambda pair: pair[0])
+        parsed = _parse_event(target_event, "nfl")
+        if parsed["state"] != "pre" and parsed["game_id"] not in seen_ids:
+            parsed["is_playoff"] = False
             games.append(parsed)
 
     return games
