@@ -157,9 +157,17 @@ def _is_playoff(event: dict, sport: str) -> bool:
         # All queried soccer URLs cover major knockout/group-stage tournaments.
         return True
 
+    # ESPN represents season.type as a bare int (2 = regular season,
+    # 3 = postseason, etc.), NOT as a nested {"id": ...} object — that's
+    # status.type further down in the payload, which does use nested dicts,
+    # making it easy to assume season.type follows the same shape. It
+    # doesn't. Calling .get("id", ...) on an int raised AttributeError on
+    # every call for NFL/NHL/MLB (soccer never hits this code path — it
+    # returns True above), which cogs/sports_scores.py's broad
+    # "except Exception" around the ESPN fetch swallowed into a WARNING log
+    # line every poll, with no other visible symptom.
     season = event.get("season", {})
-    season_type = season.get("type", {})
-    return str(season_type.get("id", "")) == _POSTSEASON_TYPE_ID
+    return str(season.get("type", "")) == _POSTSEASON_TYPE_ID
 
 
 def _parse_event(event: dict, sport: str) -> dict:
@@ -415,8 +423,9 @@ def get_live_nfl_games() -> list[dict]:
     regular_season_candidates: list[tuple[datetime, dict]] = []
 
     for event in data.get("events", []):
-        season_type = event.get("season", {}).get("type", {})
-        type_id = str(season_type.get("id", ""))
+        # season.type is a bare int (2 = regular season, 3 = postseason), not
+        # a nested {"id": ...} object — see the comment in _is_playoff().
+        type_id = str(event.get("season", {}).get("type", ""))
 
         if type_id == _POSTSEASON_TYPE_ID:
             parsed = _parse_event(event, "nfl")
