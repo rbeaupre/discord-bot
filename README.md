@@ -1,6 +1,6 @@
 # Discord Bot
 
-A Discord bot for a private server with seven features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, birthday announcements, concert alerts, Criterion Collection movie night, and live playoff sports scores. All schedules and channels are configurable per-server by admins via slash commands.
+A Discord bot for a private server with eight features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, birthday announcements, concert alerts, Criterion Collection movie night, live sports scores, and general chat via @mention. Schedules and channels for the first seven are configurable per-server by admins via slash commands; general chat has no schedule or config and is always on.
 
 ---
 
@@ -14,7 +14,8 @@ A Discord bot for a private server with seven features: sports trivia, weekly ne
 | Birthday announcements | Every day at 9:00 AM ET | `#general` | — |
 | Concert alerts | Every Monday at 9:00 AM ET | `#concert-alerts` | `/concert check` (admin) |
 | Movie night | 1st of every month at 7:00 PM ET | `#movie-night` | `/movie pick` (admin) |
-| Live sports scores | Continuous during playoffs | configurable | — |
+| Live sports scores | Continuous — playoffs (all sports) + NFL regular season | configurable | — |
+| General chat | Always on — @mention the bot anywhere | any channel | @mention |
 
 ---
 
@@ -23,7 +24,7 @@ A Discord bot for a private server with seven features: sports trivia, weekly ne
 ### Boot sequence
 
 1. `init_db()` creates any missing database tables on startup
-2. The bot connects to Discord and loads all seven feature cogs
+2. The bot connects to Discord and loads all eight feature cogs
 3. APScheduler starts inside the same asyncio event loop as the bot
 4. `on_ready` fires in each cog — each one reads its config from the database and registers scheduled jobs. If a guild has no config yet, default values are written automatically.
 
@@ -61,7 +62,9 @@ A Discord bot for a private server with seven features: sports trivia, weekly ne
 
 **Movie night** — A random unwatched film is picked from the `criterion_films` table (those not already in `movie_night_picks` for this guild). Claude writes a short enthusiastic pitch using the TMDB overview. An embed with the poster image and director byline is posted. When all films have been picked, the guild's history resets and the rotation starts over.
 
-**Live sports scores** — ESPN's public scoreboard API is polled independently per sport. NFL fires every 15 seconds (to catch touchdown + PAT as separate events); NHL, MLB, and soccer fire every 60 seconds. Only playoff/tournament games are tracked (NFL/NHL/MLB: postseason type; soccer: FIFA Men's World Cup). A "game starting" embed is posted when a game is first detected as active, a scoring play embed is posted for each new play since the last poll, and a final score embed is posted when the game ends.
+**Live sports scores** — ESPN's public scoreboard API is polled independently per sport. NFL fires every 15 seconds (to catch touchdown + PAT as separate events); NHL, MLB, and soccer fire every 60 seconds. NHL, MLB, and soccer track playoff/tournament games only (NFL/NHL/MLB: postseason type; soccer: FIFA Men's World Cup). NFL also tracks the regular season — one game per day: the day's only game, or whichever has the latest kickoff ("primetime") when several are on. A "game starting" embed is posted when a game is first detected as active, a scoring play embed is posted for each new play since the last poll, and a final score embed (labeled "Playoff" or "Regular Season") is posted when the game ends.
+
+**General chat** — @mention the bot anywhere and Claude (Haiku model) replies conversationally. Only the single message text is sent to Claude — no channel history, no DB rows, no tools/function-calling — so there's structurally nothing sensitive for a prompt injection to leak.
 
 ### Admin slash commands
 
@@ -117,7 +120,7 @@ discord_bot/
 │   ├── models.py           SQLAlchemy ORM models (9 tables)
 │   └── db.py               Engine + session factory, init_db()
 ├── utils/
-│   ├── claude_client.py    Anthropic API wrapper (trivia, music blurbs, review summaries, movie pitches)
+│   ├── claude_client.py    Anthropic API wrapper (trivia, music blurbs, review summaries, movie pitches, chat replies)
 │   ├── spotify_client.py   Spotify API wrapper (new release search + album lookup)
 │   ├── pitchfork_client.py Pitchfork scraper (Best New Albums page)
 │   ├── ticketmaster_client.py  Ticketmaster Discovery API wrapper (upcoming events by city)
@@ -130,7 +133,8 @@ discord_bot/
 │   ├── album_reviews.py    Monthly Pitchfork album review cog
 │   ├── concerts.py         Weekly concert alerts cog
 │   ├── movies.py           Monthly Criterion movie night cog
-│   └── sports_scores.py    Live playoff sports score cog
+│   ├── sports_scores.py    Live sports score cog (playoffs + NFL regular season)
+│   └── chat.py             General chat cog (@mention listener, no schedule/config)
 ├── Dockerfile              Production container image
 ├── docker-compose.yml      Local dev — runs Postgres + bot together
 └── .env.example            Template for all required secrets
