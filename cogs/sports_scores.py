@@ -41,7 +41,7 @@ from discord.ext import commands
 from sqlalchemy.exc import IntegrityError
 
 from database.db import SessionLocal
-from database.models import LiveGameState, ScheduleConfig
+from database.models import FantasyRosterEntry, LiveGameState, ScheduleConfig
 from utils.sports_client import (
     ACTIVE_STATUSES,
     FINAL_STATUSES,
@@ -183,6 +183,37 @@ def _season_footer(sport: str, game: dict) -> str:
     if is_playoff is False:
         return f"{label} · Regular Season"
     return label
+
+
+def _apply_team_branding(
+    embed: discord.Embed, game: dict, thumbnail_override: str | None = None
+) -> None:
+    """
+    Attach both teams' logos to an embed: the home team's logo as the small
+    author icon (top-left), and either thumbnail_override (e.g. a scoring
+    play's player headshot) or the away team's logo as the thumbnail
+    (top-right). A Discord embed only has one author-icon slot and one
+    thumbnail slot, so this is the pairing that fits both logos on a
+    scoring-play embed without displacing the player headshot it already
+    uses the thumbnail for.
+
+    game["home_logo"]/["away_logo"] are set by utils.sports_client for every
+    game dict freshly fetched from ESPN. They're absent on the synthetic dict
+    _poll_scores builds from stored LiveGameState columns when a game
+    disappears from the feed mid-poll — LiveGameState doesn't persist logo
+    URLs, so this silently no-ops for whichever side lacks one, the same
+    degrade-gracefully handling already used for that dict's missing
+    is_playoff/period/display_clock fields.
+    """
+    home_logo = game.get("home_logo")
+    away_logo = game.get("away_logo")
+
+    if home_logo:
+        embed.set_author(name=f"{game.get('away_team', '')} @ {game.get('home_team', '')}", icon_url=home_logo)
+
+    thumbnail_url = thumbnail_override or away_logo
+    if thumbnail_url:
+        embed.set_thumbnail(url=thumbnail_url)
 
 
 def _job_id(guild_id: int, sport: str) -> str:
@@ -679,6 +710,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(text=_season_footer(sport, game))
+        _apply_team_branding(embed, game)
         await channel.send(embed=embed)
 
     async def _post_scoring_play(
@@ -715,9 +747,25 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         team = play.get("team") or ""
         play_type = play.get("type") or "Score"
         clock = play.get("clock") or ""
+        headshot_url = play.get("headshot_url")
+
+        # NFL-only: espn_player_id (from utils.sports_client.get_nfl_scoring_plays)
+        # is the same universal ESPN athlete ID used in fantasy rosters, so a
+        # direct ID lookup avoids fragile name matching between the two APIs.
+        fantasy_manager = None
+        espn_player_id = play.get("espn_player_id")
+        if sport == "nfl" and espn_player_id is not None:
+            fantasy_manager = self._get_fantasy_manager(channel.guild.id, espn_player_id)
 
         # Use the player name when available; fall back to the team name.
-        title = f"{scorer} scores!" if scorer else f"{team} scores!"
+        # When the scorer is on a tracked fantasy roster, lead with the
+        # manager's name instead of a bare player name.
+        if fantasy_manager and scorer:
+            title = f"{fantasy_manager}'s player, {scorer}, scores!"
+        elif scorer:
+            title = f"{scorer} scores!"
+        else:
+            title = f"{team} scores!"
 
         # Show the score at the moment of this specific play. During a penalty
         # shootout the regulation score is frozen (a tie), so we prefix the line
@@ -741,7 +789,25 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         )
         footer_parts = [p for p in [play_type, clock, label] if p]
         embed.set_footer(text=" · ".join(footer_parts))
+        _apply_team_branding(embed, game, thumbnail_override=headshot_url)
         await channel.send(embed=embed)
+
+    def _get_fantasy_manager(self, guild_id: int, espn_player_id: int) -> str | None:
+        """
+        Look up which fantasy manager (if any) owns this player in the
+        guild's cached ESPN Fantasy roster snapshot — see cogs/fantasy.py,
+        which populates fantasy_roster_entries on a daily refresh. Returns
+        None if the fantasy feature isn't configured for this guild, or the
+        player isn't on anyone's roster (free agent, or on a bench/team not
+        in this league at all).
+        """
+        with SessionLocal() as session:
+            entry = (
+                session.query(FantasyRosterEntry)
+                .filter_by(guild_id=guild_id, espn_player_id=espn_player_id)
+                .first()
+            )
+            return entry.manager_name if entry else None
 
     async def _post_score_update(
         self,
@@ -777,6 +843,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(text=_season_footer(sport, game))
+        _apply_team_branding(embed, game)
         await channel.send(embed=embed)
 
     async def _post_final_score(
@@ -820,12 +887,24 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             title = "Final (After Extra Time)"
         elif status_name == "STATUS_FINAL_PEN":
             title = "Final (After Penalties)"
+        elif status_name == "STATUS_FINAL_OT":
+            # ESPN's overtime-final status for NFL/NHL (soccer uses
+            # STATUS_FINAL_AET instead — see above).
+            title = "Final (Overtime)"
         elif home_pen is not None and away_pen is not None:
             # Penalty shootout scores are present — game ended in a shootout even
             # though ESPN never surfaced STATUS_FINAL_PEN.
             title = "Final (After Penalties)"
-        elif game.get("period", 0) >= 3:
-            # Period 3 or above means the game went to extra time halves.
+        elif sport == "soccer" and game.get("period", 0) >= 3:
+            # Period 3+ only means extra time under SOCCER's period numbering
+            # (1-2 = halves, 3-4 = extra-time halves). This must stay gated to
+            # soccer: for NFL (1-4 = Q1-Q4) and NHL (1-3 = P1-P3), period 3 or
+            # 4 is a completely ordinary regulation period, not overtime — a
+            # ungated period>=3 check here previously mislabeled any NFL game
+            # that finished in the 3rd or 4th quarter as "After Extra Time"
+            # (e.g. an ordinary STATUS_FINAL Q4 finish, period=4, tripped this
+            # branch before the STATUS_FINAL_OT branch above existed to catch
+            # actual NFL overtime games instead).
             title = "Final (After Extra Time)"
         else:
             title = "Final Score"
@@ -878,6 +957,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             embed.add_field(name="Time", value=time_value, inline=True)
 
         embed.set_footer(text=_season_footer(sport, game))
+        _apply_team_branding(embed, game)
         await channel.send(embed=embed)
 
     # ──────────────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ What happens at startup
 3. setup_hook() (called before the bot connects to Discord):
       a. Starts the APScheduler so it's running before cogs register their jobs.
       b. Loads all feature cogs (trivia, music, birthdays, album reviews,
-         concerts, movies, sports scores, chat).
+         concerts, movies, sports scores, chat, fantasy).
       c. Syncs slash commands to Discord — instantly if DEV_GUILD_ID is set,
          otherwise globally (takes up to 1 hour to propagate).
 4. The bot connects and on_ready() fires in each cog, which registers
@@ -99,6 +99,7 @@ class DiscordBot(commands.Bot):
             "cogs.movies",
             "cogs.sports_scores",
             "cogs.chat",
+            "cogs.fantasy",
         ]:
             try:
                 await self.load_extension(cog_path)
@@ -171,7 +172,7 @@ class DiscordBot(commands.Bot):
         logger.info("Joined new guild: %s (ID: %d)", guild.name, guild.id)
 
         # Each cog's _schedule_for_guild creates default config rows if missing.
-        for cog_name in ["Trivia", "Music", "Birthdays", "AlbumReviews", "Concerts", "Movies", "SportsScores"]:
+        for cog_name in ["Trivia", "Music", "Birthdays", "AlbumReviews", "Concerts", "Movies", "SportsScores", "Fantasy"]:
             cog = self.get_cog(cog_name)
             if cog:
                 await cog._schedule_for_guild(guild.id)

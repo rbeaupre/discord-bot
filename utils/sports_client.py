@@ -35,6 +35,7 @@ get_all_live_playoff_games(sports)  → dict[str, list[dict]]
 """
 
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -46,6 +47,18 @@ _EASTERN = ZoneInfo("America/New_York")
 
 _BASE_URL = "https://site.api.espn.com/apis/site/v2/sports"
 _REQUEST_TIMEOUT = 15
+
+# Per-game play-by-play/boxscore endpoint, used only for NFL — see
+# get_nfl_scoring_plays() for why.
+_NFL_SUMMARY_URL = f"{_BASE_URL}/football/nfl/summary"
+
+# Every NFL scoring play's `text` field observed in practice (rushing,
+# passing, field goal, interception/fumble return TDs) starts with the
+# scorer's full name followed by " {yards} Yd ", e.g. "Kyren Williams 5 Yd
+# Rush (...)" or "Demarcus Robinson 39 Yd pass from Brock Purdy (...)" (the
+# receiver, not the passer, since they're the one who scored). Matched
+# non-greedily so a name containing a number-like token doesn't overrun.
+_SCORER_NAME_RE = re.compile(r"^(.+?) \d+ Yd ")
 
 # ESPN season type IDs for NFL, NHL, and MLB: "2" is the regular season,
 # "3" is postseason / playoffs.
@@ -115,13 +128,18 @@ class SportsAPIError(Exception):
     pass
 
 
-def _fetch_scoreboard(url: str) -> dict:
+def _fetch_scoreboard(url: str, params: dict | None = None) -> dict:
     """
-    Fetch a single ESPN scoreboard endpoint and return the parsed JSON body.
+    Fetch a single ESPN endpoint and return the parsed JSON body.
+
+    Despite the name (most callers hit a scoreboard endpoint), this is also
+    used by get_nfl_scoring_plays() to fetch ESPN's per-game summary endpoint,
+    which takes an `event` query param — hence the optional params argument.
 
     Parameters
     ----------
-    url : Full scoreboard URL.
+    url    : Full endpoint URL.
+    params : Optional query parameters.
 
     Raises
     ------
@@ -129,7 +147,7 @@ def _fetch_scoreboard(url: str) -> dict:
         If the HTTP request fails or returns a non-2xx status code.
     """
     try:
-        response = requests.get(url, timeout=_REQUEST_TIMEOUT)
+        response = requests.get(url, params=params, timeout=_REQUEST_TIMEOUT)
         response.raise_for_status()
     except requests.RequestException as exc:
         raise SportsAPIError(f"ESPN request failed for {url!r}: {exc}") from exc
@@ -200,6 +218,8 @@ def _parse_event(event: dict, sport: str) -> dict:
         completed          – True when ESPN marks the event as finished (bool)
         display_clock      – human-readable game clock, e.g. "74:52" (str)
         period             – period/half/quarter number (int)
+        home_logo          – URL to the home team's logo image, or "" (str)
+        away_logo          – URL to the away team's logo image, or "" (str)
         scoring_plays      – list of scoring play dicts (list[dict])
     """
     game_id = event.get("id", "")
@@ -213,13 +233,17 @@ def _parse_event(event: dict, sport: str) -> dict:
     away_team = "Away"
     home_score = 0
     away_score = 0
+    home_logo = ""
+    away_logo = ""
     # Penalty shootout scores — only present when ESPN reports a shootout.
     # None means no shootout data available (regulation or AET finish).
     home_penalty_score: int | None = None
     away_penalty_score: int | None = None
 
     for comp in competitors:
-        name = comp.get("team", {}).get("displayName", "Unknown")
+        team = comp.get("team", {})
+        name = team.get("displayName", "Unknown")
+        logo = team.get("logo", "")
         try:
             score = int(comp.get("score") or 0)
         except (ValueError, TypeError):
@@ -238,10 +262,12 @@ def _parse_event(event: dict, sport: str) -> dict:
             home_team = name
             home_score = score
             home_penalty_score = pen_score
+            home_logo = logo
         elif comp.get("homeAway") == "away":
             away_team = name
             away_score = score
             away_penalty_score = pen_score
+            away_logo = logo
 
     status_obj = event.get("status", {})
     status_type = status_obj.get("type", {})
@@ -304,6 +330,8 @@ def _parse_event(event: dict, sport: str) -> dict:
         "completed": completed,
         "display_clock": display_clock,
         "period": period,
+        "home_logo": home_logo,
+        "away_logo": away_logo,
         "scoring_plays": scoring_plays,
     }
 
@@ -456,7 +484,112 @@ def get_live_nfl_games() -> list[dict]:
             parsed["is_playoff"] = False
             games.append(parsed)
 
+    # NFL's scoreboard endpoint never populates competition.details (verified
+    # empirically against live and finished games — it's always an empty
+    # list for this sport, unlike soccer/hockey), so _parse_event() above
+    # always leaves scoring_plays as []. Fetch the richer, player-attributed
+    # version from the summary endpoint for each game we're actually
+    # tracking (at most one regular-season game plus whatever's in the
+    # playoffs, so this is a small, bounded number of extra requests).
+    for game in games:
+        try:
+            game["scoring_plays"] = get_nfl_scoring_plays(game["game_id"])
+        except SportsAPIError as exc:
+            logger.warning(
+                "Failed to fetch NFL play-by-play for game %s: %s",
+                game["game_id"], exc,
+            )
+
     return games
+
+
+def get_nfl_scoring_plays(game_id: str) -> list[dict]:
+    """
+    Fetch player-attributed scoring plays for one NFL game from ESPN's
+    per-game summary endpoint.
+
+    The main /scoreboard endpoint (used for every other sport, and for
+    everything else about an NFL game — score, status, clock) never
+    populates competition.details for NFL, so it can't tell us WHO scored.
+    /summary?event={id} does: its top-level scoringPlays array has a
+    consistently formatted `text` field across every scoring type observed
+    (rushing/passing/return TDs, field goals) — always
+    "{Scorer Full Name} {yards} Yd {action}...". We parse the scorer's name
+    out of that prefix (see _SCORER_NAME_RE) since scoringPlays entries don't
+    carry a structured athlete field of their own.
+
+    Player IDs and headshot images come from a second part of the same
+    response: boxscore.players lists every athlete who recorded a stat in
+    the game (across both teams and all stat categories — passing, rushing,
+    receiving, defensive, interceptions, kick/punt returns, kicking,
+    punting), each with a display name, ESPN's universal athlete ID (the
+    same ID space used elsewhere, e.g. Fantasy rosters), and a headshot CDN
+    URL. We build a name -> (id, headshot) map from that once per call and
+    match the parsed scorer name against it — no extra API call needed for
+    the photo.
+
+    A parse or match failure just leaves the affected field(s) empty/None
+    rather than raising — callers already treat a missing scorer name as "no
+    attribution available" (see cogs/sports_scores.py), so this degrades
+    safely instead of breaking the whole poll over one oddly-worded play.
+
+    Parameters
+    ----------
+    game_id : ESPN's event ID string, e.g. "401872657".
+
+    Returns
+    -------
+    list[dict], one entry per scoring play, in chronological order:
+        index          : position in this list. Used the same way as the
+                         raw details-array index elsewhere in this module —
+                         to detect which plays are new since the last poll.
+        scorer         : player's full name, or "" if the text didn't match
+                         the expected pattern.
+        espn_player_id : int | None — set only when the parsed name matched
+                         an athlete in this game's boxscore.
+        headshot_url   : str | None — set under the same condition.
+        team           : scoring team's display name.
+        type           : short play-type label, e.g. "Passing Touchdown".
+        clock          : game clock at the time of the play, e.g. "4:28".
+
+    Raises
+    ------
+    SportsAPIError
+        If the request to ESPN fails.
+    """
+    data = _fetch_scoreboard(_NFL_SUMMARY_URL, params={"event": game_id})
+
+    athlete_by_name: dict[str, tuple[int, str | None]] = {}
+    for team_block in data.get("boxscore", {}).get("players", []):
+        for category in team_block.get("statistics", []):
+            for entry in category.get("athletes", []):
+                athlete = entry.get("athlete", {})
+                name = athlete.get("displayName") or athlete.get("fullName")
+                athlete_id = athlete.get("id")
+                if not name or athlete_id is None:
+                    continue
+                headshot_url = athlete.get("headshot", {}).get("href")
+                athlete_by_name[name] = (int(athlete_id), headshot_url)
+
+    plays: list[dict] = []
+    for i, sp in enumerate(data.get("scoringPlays", [])):
+        text = sp.get("text", "")
+        match = _SCORER_NAME_RE.match(text)
+        scorer = match.group(1) if match else ""
+
+        athlete_id, headshot_url = athlete_by_name.get(scorer, (None, None))
+
+        plays.append({
+            "index": i,
+            "scorer": scorer,
+            "espn_player_id": athlete_id,
+            "headshot_url": headshot_url,
+            "team": sp.get("team", {}).get("displayName", ""),
+            "type": sp.get("type", {}).get("text", ""),
+            "clock": sp.get("clock", {}).get("displayValue", ""),
+        })
+
+    return plays
 
 
 def get_all_live_playoff_games(sports: list[str]) -> dict[str, list[dict]]:

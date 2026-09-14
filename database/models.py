@@ -31,6 +31,13 @@ trivia_question_posts — Per-guild history of trivia questions Claude has
                         the rotation doesn't keep landing on the same
                         "greatest hits" fact every time that era comes back
                         around.
+fantasy_league_configs — One row per guild storing its ESPN Fantasy Football
+                        league ID, season, and session cookies (espn_s2,
+                        SWID) needed to read a private league's rosters.
+fantasy_roster_entries — Per-guild cache of which fantasy manager owns which
+                        NFL player, refreshed daily from ESPN. Replaced
+                        wholesale on each refresh rather than diffed, since
+                        ESPN doesn't expose an incremental roster-change feed.
 """
 
 import json
@@ -105,6 +112,9 @@ class ScheduleConfig(Base):
     "concerts"      — weekly concert alerts via Ticketmaster (default Monday 9 am ET)
     "movies"        — monthly Criterion Collection movie night pick (default 1st, 7 pm ET)
     "sports_scores" — continuous live playoff score polling (interval-based, not cron)
+    "fantasy"       — daily fantasy football roster resync (default 8 am ET). League ID,
+                      season, and cookies live in FantasyLeagueConfig instead of here —
+                      this row only holds the alert channel and refresh time.
 
     Content options
     ---------------
@@ -118,6 +128,7 @@ class ScheduleConfig(Base):
     concerts:      {"cities": ["Toronto", "Montreal"]}
     movies:        {"day_of_month": 1}
     sports_scores: {"enabled": true, "enabled_sports": ["nfl", "nhl", "mlb", "soccer"]}
+    fantasy:       {}   ← no content options, just scheduling / channel
     """
 
     __tablename__ = "schedule_configs"
@@ -522,4 +533,107 @@ class TriviaQuestionPost(Base):
         return (
             f"<TriviaQuestionPost guild={self.guild_id} sport={self.sport!r} "
             f"era={self.era!r} posted={self.posted_at}>"
+        )
+
+
+class FantasyLeagueConfig(Base):
+    """
+    Stores one guild's ESPN Fantasy Football league connection.
+
+    espn_s2 and SWID are opaque session cookie values copied from a
+    logged-in fantasy.espn.com browser session — required to read a private
+    league's data (the common case for home/friend leagues; ESPN's fantasy
+    API otherwise returns 401 AUTH_LEAGUE_NOT_VISIBLE). They're entered via
+    a Discord modal (see cogs/fantasy.py's CookiesModal) rather than a slash
+    command argument, since Discord shows slash command *argument values* in
+    the channel as part of the "X used /command" message regardless of
+    whether the bot's reply is ephemeral — a modal submission has no such
+    public echo.
+
+    ESPN doesn't publish an expiry for these cookies; they can stop working
+    at any time. cookies_valid tracks whether the most recent refresh
+    succeeded, so cogs/fantasy.py can post a one-time alert on the
+    valid → invalid transition instead of re-alerting on every failed daily
+    refresh while the admin hasn't gotten around to rotating them yet.
+    """
+
+    __tablename__ = "fantasy_league_configs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # One fantasy config per guild.
+    guild_id = Column(BigInteger, nullable=False, unique=True, index=True)
+
+    # The numeric leagueId from the league's fantasy.espn.com URL.
+    league_id = Column(BigInteger, nullable=False)
+
+    # NFL season year the league_id belongs to (e.g. 2026 for the 2026-27
+    # season) — ESPN's fantasy API keys everything by season.
+    season = Column(Integer, nullable=False)
+
+    # Session cookies from a logged-in fantasy.espn.com browser. See class
+    # docstring for why these come from a modal, not a command argument.
+    # Nullable because /fantasy config league and /fantasy config cookies are
+    # two separate commands that can be run in either order — a league_id
+    # with no cookies yet just means refreshes are skipped until both exist.
+    espn_s2 = Column(String, nullable=True)
+    swid = Column(String, nullable=True)
+
+    # False once a refresh gets a 401 from ESPN — see class docstring.
+    cookies_valid = Column(Boolean, nullable=False, default=True)
+
+    # UTC timestamp of the last successful roster refresh, or NULL if none
+    # has succeeded yet.
+    last_refreshed_at = Column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<FantasyLeagueConfig guild={self.guild_id} league={self.league_id} "
+            f"season={self.season} cookies_valid={self.cookies_valid}>"
+        )
+
+
+class FantasyRosterEntry(Base):
+    """
+    Caches which fantasy manager owns which NFL player, for one guild.
+
+    Populated by cogs/fantasy.py's daily refresh job, which deletes and
+    re-inserts every row for the guild each time — ESPN doesn't expose an
+    incremental "what changed" feed, so a full re-sync is the simplest
+    reliable way to catch trades, waiver claims, and drops.
+
+    espn_player_id is ESPN's universal athlete ID — the same ID space used
+    in utils.sports_client's NFL scoring play data (get_nfl_scoring_plays),
+    which is what lets cogs/sports_scores.py match a scoring play directly to
+    a roster entry by ID instead of fragile name matching between the two
+    separate ESPN APIs.
+    """
+
+    __tablename__ = "fantasy_roster_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    # The Discord server this roster snapshot belongs to.
+    guild_id = Column(BigInteger, nullable=False, index=True)
+
+    # ESPN's universal athlete ID — shared with utils.sports_client.
+    espn_player_id = Column(Integer, nullable=False, index=True)
+
+    # Player's full name, as ESPN's fantasy API reports it. Stored for
+    # reference only — matching is always done by espn_player_id.
+    player_name = Column(String(200), nullable=False)
+
+    # Display name of the fantasy team's first listed owner. Co-owned teams
+    # only surface the first owner.
+    manager_name = Column(String(200), nullable=False)
+
+    # Each player appears at most once per guild's roster snapshot.
+    __table_args__ = (
+        UniqueConstraint("guild_id", "espn_player_id", name="uq_guild_fantasy_player"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FantasyRosterEntry guild={self.guild_id} player={self.player_name!r} "
+            f"manager={self.manager_name!r}>"
         )

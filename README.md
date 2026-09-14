@@ -1,6 +1,6 @@
 # Discord Bot
 
-A Discord bot for a private server with eight features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, birthday announcements, concert alerts, Criterion Collection movie night, live sports scores, and general chat via @mention. Schedules and channels for the first seven are configurable per-server by admins via slash commands; general chat has no schedule or config and is always on.
+A Discord bot for a private server with nine features: sports trivia, weekly new music releases, monthly Pitchfork album reviews, birthday announcements, concert alerts, Criterion Collection movie night, live sports scores (with an optional ESPN Fantasy Football tie-in), and general chat via @mention. Schedules and channels for the first seven are configurable per-server by admins via slash commands; the fantasy tie-in has its own `/fantasy config` commands; general chat has no schedule or config and is always on.
 
 ---
 
@@ -15,6 +15,7 @@ A Discord bot for a private server with eight features: sports trivia, weekly ne
 | Concert alerts | Every Monday at 9:00 AM ET | `#concert-alerts` | `/concert check` (admin) |
 | Movie night | 1st of every month at 7:00 PM ET | `#movie-night` | `/movie pick` (admin) |
 | Live sports scores | Continuous — playoffs (all sports) + NFL regular season | configurable | — |
+| Fantasy football tie-in (optional) | Daily roster resync at 8:00 AM ET | n/a (enriches live score embeds) | `/fantasy refresh` (admin) |
 | General chat | Always on — @mention the bot anywhere | any channel | @mention |
 
 ---
@@ -48,6 +49,10 @@ A Discord bot for a private server with eight features: sports trivia, weekly ne
 
 **`live_game_states`** — per-guild tracking state for each in-progress or recently finished playoff game. Stores the current score, the index of the last scoring play reported, and whether the game-start embed has been posted. Used to make ESPN polling idempotent across bot restarts.
 
+**`fantasy_league_configs`** — one row per guild storing its ESPN Fantasy Football league ID, season, and session cookies (`espn_s2`, `SWID`). Cookies are entered through a Discord modal via `/fantasy config cookies`, never a command argument — see "Setting up the fantasy football tie-in" below for why.
+
+**`fantasy_roster_entries`** — per-guild cache of which fantasy manager owns which NFL player, refreshed daily from ESPN and replaced wholesale each time (ESPN doesn't expose an incremental roster-change feed). Matched to live scoring plays by ESPN's universal athlete ID, not by name.
+
 ### Content generation
 
 **Trivia** — Claude (Haiku model) is prompted to return a JSON object containing the question, four answer options, the correct letter, and an explanation. The answer is posted inside a Discord spoiler tag (`||text||`) so members have to click to reveal it.
@@ -62,7 +67,9 @@ A Discord bot for a private server with eight features: sports trivia, weekly ne
 
 **Movie night** — A random unwatched film is picked from the `criterion_films` table (those not already in `movie_night_picks` for this guild). Claude writes a short enthusiastic pitch using the TMDB overview. An embed with the poster image and director byline is posted. When all films have been picked, the guild's history resets and the rotation starts over.
 
-**Live sports scores** — ESPN's public scoreboard API is polled independently per sport. NFL fires every 15 seconds (to catch touchdown + PAT as separate events); NHL, MLB, and soccer fire every 60 seconds. NHL, MLB, and soccer track playoff/tournament games only (NFL/NHL/MLB: postseason type; soccer: FIFA Men's World Cup). NFL also tracks the regular season — one game per day: the day's only game, or whichever has the latest kickoff ("primetime") when several are on. A "game starting" embed is posted when a game is first detected as active, a scoring play embed is posted for each new play since the last poll, and a final score embed (labeled "Playoff" or "Regular Season") is posted when the game ends.
+**Live sports scores** — ESPN's public scoreboard API is polled independently per sport. NFL fires every 15 seconds (to catch touchdown + PAT as separate events); NHL, MLB, and soccer fire every 60 seconds. NHL, MLB, and soccer track playoff/tournament games only (NFL/NHL/MLB: postseason type; soccer: FIFA Men's World Cup). NFL also tracks the regular season — one game per day: the day's only game, or whichever has the latest kickoff ("primetime") when several are on. A "game starting" embed is posted when a game is first detected as active, a scoring play embed is posted for each new play since the last poll, and a final score embed (labeled "Playoff" or "Regular Season") is posted when the game ends. NFL scoring plays are attributed to the player who scored — name plus a headshot thumbnail, pulled from ESPN's per-game summary endpoint (the scoreboard endpoint alone never says who scored for this sport). Every embed also shows both teams' logos (home team as the small author icon, away team as the thumbnail — or a scorer's headshot in that thumbnail slot instead, when there is one).
+
+**Fantasy football tie-in (optional)** — When a scoring NFL player is on a manager's roster in your connected ESPN Fantasy Football league, the scoring play embed leads with the manager's name instead of just the player's, e.g. "Alice's player, Kyren Williams, scores!" Roster data is refreshed daily and matched to live scoring plays by ESPN's universal athlete ID (shared between the site API and the Fantasy API), not by name — sidesteps mismatches from suffixes ("Jr.", "Sr.") or punctuation. See "Setting up the fantasy football tie-in" below to enable it.
 
 **General chat** — @mention the bot anywhere and Claude (Haiku model) replies conversationally. Only the single message text is sent to Claude — no channel history, no DB rows, no tools/function-calling — so there's structurally nothing sensitive for a prompt injection to leak.
 
@@ -107,6 +114,12 @@ All `/config` subcommands require Manage Server permissions. Changes are live im
 | `/scores config sports` | Toggle individual sports on/off (admin) |
 | `/scores config enable` | Enable live score alerts |
 | `/scores config disable` | Disable live score alerts |
+| `/fantasy status` | Show fantasy league config, cookie health, cached roster size |
+| `/fantasy refresh` | Refresh the fantasy roster cache from ESPN right now (admin) |
+| `/fantasy config league <id> [season]` | Set the ESPN Fantasy league ID (admin) |
+| `/fantasy config cookies` | Open a private form to set `espn_s2`/`SWID` (admin) |
+| `/fantasy config channel #ch` | Set the cookie-expiration alert channel (admin) |
+| `/fantasy config time 08:00` | Set the daily roster refresh time (24h ET) (admin) |
 
 ---
 
@@ -117,7 +130,7 @@ discord_bot/
 ├── bot.py                  Entry point — run this to start the bot
 ├── config.py               Loads and validates all environment variables
 ├── database/
-│   ├── models.py           SQLAlchemy ORM models (9 tables)
+│   ├── models.py           SQLAlchemy ORM models (11 tables)
 │   └── db.py               Engine + session factory, init_db()
 ├── utils/
 │   ├── claude_client.py    Anthropic API wrapper (trivia, music blurbs, review summaries, movie pitches, chat replies)
@@ -125,7 +138,8 @@ discord_bot/
 │   ├── pitchfork_client.py Pitchfork scraper (Best New Albums page)
 │   ├── ticketmaster_client.py  Ticketmaster Discovery API wrapper (upcoming events by city)
 │   ├── tmdb_client.py      TMDB API wrapper (Criterion Collection catalog)
-│   └── sports_client.py    ESPN public API wrapper (live playoff scoreboards)
+│   ├── sports_client.py    ESPN public API wrapper (live scoreboards + player-attributed NFL play-by-play)
+│   └── espn_fantasy_client.py  ESPN Fantasy Football API wrapper (private league rosters)
 ├── cogs/
 │   ├── trivia.py           Sports trivia cog
 │   ├── music.py            Music releases cog
@@ -134,6 +148,7 @@ discord_bot/
 │   ├── concerts.py         Weekly concert alerts cog
 │   ├── movies.py           Monthly Criterion movie night cog
 │   ├── sports_scores.py    Live sports score cog (playoffs + NFL regular season)
+│   ├── fantasy.py          Fantasy football tie-in cog (daily roster resync)
 │   └── chat.py             General chat cog (@mention listener, no schedule/config)
 ├── Dockerfile              Production container image
 ├── docker-compose.yml      Local dev — runs Postgres + bot together
@@ -174,6 +189,38 @@ Fill in all values in `.env`:
 ### 3. Run locally
 
 See the [Local development](#local-development) section below.
+
+---
+
+## Setting up the fantasy football tie-in
+
+This is optional — the rest of the bot works fine without it. It links live NFL scoring alerts to a private ESPN Fantasy Football league so a scoring embed can call out "Alice's player, Kyren Williams, scores!" instead of just the player's name.
+
+There's no env var for this — everything is per-server and stored in the database, set up entirely through Discord commands.
+
+### Initial setup
+
+1. **Find your league ID.** Open your league on fantasy.espn.com and copy the numeric `leagueId` from the URL, e.g. `...leagues/1234567?...` → `1234567`.
+2. **Set it**: `/fantasy config league <league_id>` (add a `season` argument only if you need a season other than the current one).
+3. **Check if your league is private** (most home leagues are — this determines whether you need cookies at all):
+   ```bash
+   curl -H "User-Agent: Mozilla/5.0" \
+     "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/<league_id>"
+   ```
+   - `{"messages":["You are not authorized to view this League."]}` → private, continue to step 4.
+   - A JSON blob with team/league data → public, skip to step 6.
+4. **Grab your session cookies.** Log into fantasy.espn.com in a browser, then open DevTools (`Cmd+Option+I` on Mac, `F12` on Windows) → **Application** tab (Chrome) or **Storage** tab (Firefox) → **Cookies** → `https://fantasy.espn.com`. Copy the values of:
+   - `espn_s2` — a long opaque string
+   - `SWID` — looks like `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, **including** the curly braces
+5. **Set them**: run `/fantasy config cookies` in Discord. This opens a private form (a Discord modal), not command arguments — paste `espn_s2` and `SWID` into the two fields and submit. This is deliberate: Discord shows slash command *argument values* in the channel as part of the "X used /command" message even when the bot's reply is ephemeral, which would leak a session credential to everyone in the channel. The modal has no such public echo — treat these values like a password, not a config setting.
+6. **Sync now**: `/fantasy refresh` — it reports how many players got cached, or a clear error if something's wrong.
+7. *(Optional)* `/fantasy config channel #ch` to pick where cookie-expiration alerts get posted, and `/fantasy config time HH:MM` to change the daily refresh time (default 8:00 AM ET).
+
+### When it stops working (cookie expiration)
+
+ESPN's `espn_s2`/`SWID` cookies have no published expiry and can stop working at any time — this is normal, expected maintenance, not a bug. When it happens, every refresh gets a 401 and the bot posts a one-time alert to your configured fantasy channel. To fix it: repeat steps 4–6 above (grab fresh cookies, paste into `/fantasy config cookies`, run `/fantasy refresh`). No VM access, redeploy, or code change is ever needed.
+
+This can't be fully automated end-to-end: ESPN's actual login goes through Disney's identity service rather than a documented public API, so a scripted login is fragile and tends to break silently whenever ESPN changes that flow. A headless-browser approach could technically drive a real login, but it would require storing your ESPN **account password** — a bigger secret than the two session cookies — for something that only needs doing a few times a year. Two minutes of copy-pasting was judged the better trade-off.
 
 ---
 
@@ -363,3 +410,4 @@ docker run -d --restart=always --env-file .env --name discord-bot discord-bot
 - [ ] `/concert check` posts alerts or reports "no new shows found"
 - [ ] `/movie setup` completes without error, then `/movie pick` posts a film
 - [ ] `/scores config enable` + `/scores config channel #ch` — verify setup (score alerts only fire during active playoffs)
+- [ ] *(Optional)* Fantasy tie-in: `/fantasy config league`, `/fantasy config cookies`, `/fantasy refresh` — reports a cached player count
