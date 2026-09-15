@@ -185,26 +185,60 @@ def _season_footer(sport: str, game: dict) -> str:
     return label
 
 
+# ESPN's teamlogos CDN doesn't offer alternate resolution folders — every
+# team logo URL this bot uses is a fixed 500x500 (confirmed empirically: a
+# plain /200/ or /100/ path in place of /500/ 404s). Its general-purpose
+# image "combiner" endpoint does support on-the-fly resizing via w/h query
+# params though (verified against a real logo URL — returns a correctly
+# resized PNG), which is what _post_final_score uses to show the winning
+# team's logo a bit smaller than the full 500x500 original.
+_ESPN_CDN_PREFIX = "https://a.espncdn.com"
+
+
+def _resize_espn_logo(url: str, size: int) -> str:
+    """Return `url` resized to `size`x`size` via ESPN's image combiner endpoint."""
+    path = url.removeprefix(_ESPN_CDN_PREFIX) if url.startswith(_ESPN_CDN_PREFIX) else url
+    return f"{_ESPN_CDN_PREFIX}/combiner/i?img={path}&w={size}&h={size}"
+
+
 def _apply_team_branding(
-    embed: discord.Embed, game: dict, thumbnail_override: str | None = None, compact: bool = False
+    embed: discord.Embed,
+    game: dict,
+    thumbnail_override: str | None = None,
+    compact: bool = False,
+    author_name: str | None = None,
+    author_icon: str | None = None,
+    thumbnail_fallback: str | None = None,
 ) -> None:
     """
-    Attach both teams' logos to an embed: the home team's logo, and either
-    thumbnail_override (e.g. a scoring play's player headshot) or the away
-    team's logo as the thumbnail (top-right).
+    Attach team branding to an embed, in one of two ways depending on
+    compact — a Discord embed only has one large-image slot, one
+    author-icon slot, and one thumbnail slot, so different embed types use
+    different combinations:
 
-    compact controls where the home logo goes, since a Discord embed only
-    has one large-image slot and one thumbnail slot:
       - False (default; game start, score update, final score — posted a
-        handful of times per game): home logo in the large embed image
-        (bottom). Gives both teams comparable visual weight for these
-        lower-frequency, more "event"-like embeds.
+        handful of times per game): home team's logo in the large embed
+        image (bottom), away team's logo (or thumbnail_override) in the
+        thumbnail (top-right). Both teams get comparable visual weight for
+        these lower-frequency, more "event"-like embeds. author_name/
+        author_icon are ignored in this mode.
       - True (scoring plays — posted every time anyone scores, so several
-        times a game): home logo in the small author icon (top-left)
-        instead. set_image() always renders as a large banner in Discord
-        regardless of the source image's actual resolution — fine
-        occasionally, but overwhelming when it repeats on every touchdown,
-        field goal, and PAT (reported against a real game on 2026-09-14).
+        times a game): author_name/author_icon (the specific team that just
+        scored, and its logo — resolved by the caller, since this function
+        only knows the game's home/away teams, not which one scored) go in
+        the small author row instead of any home/away branding. Two earlier
+        versions tried an "Away @ Home" matchup line with the home logo,
+        then removed team branding from scoring plays entirely — both read
+        oddly (a lone small logo with nothing matching on the other side,
+        for info the score line already states). Naming the actual scoring
+        team is more useful there than either.
+
+    thumbnail_override takes priority in the thumbnail slot (a scoring
+    play's player headshot, when known); thumbnail_fallback is used next
+    (the caller passes the *opposing* team's logo for scoring plays, so the
+    thumbnail never repeats the same team the author row already names);
+    game["away_logo"] is the last resort, used by the non-compact embeds
+    that don't pass thumbnail_fallback at all.
 
     game["home_logo"]/["away_logo"] are set by utils.sports_client for every
     game dict freshly fetched from ESPN. They're absent on the synthetic dict
@@ -217,16 +251,13 @@ def _apply_team_branding(
     home_logo = game.get("home_logo")
     away_logo = game.get("away_logo")
 
-    if home_logo:
-        if compact:
-            embed.set_author(
-                name=f"{game.get('away_team', '')} @ {game.get('home_team', '')}",
-                icon_url=home_logo,
-            )
-        else:
-            embed.set_image(url=home_logo)
+    if compact:
+        if author_name and author_icon:
+            embed.set_author(name=author_name, icon_url=author_icon)
+    elif home_logo:
+        embed.set_image(url=home_logo)
 
-    thumbnail_url = thumbnail_override or away_logo
+    thumbnail_url = thumbnail_override or thumbnail_fallback or away_logo
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
 
@@ -244,6 +275,52 @@ def _job_id(guild_id: int, sport: str) -> str:
     independent polling interval (e.g. 15 s for NFL, 60 s for NHL/MLB/soccer).
     """
     return f"sports_scores_{sport}_{guild_id}"
+
+
+# ── /scores preview sample data ─────────────────────────────────────────────
+# Real team/player/logo/headshot data from an actual Broncos @ Chiefs game
+# (2026-09-14 MNF), used so /scores preview posts embeds through the exact
+# same _post_game_start/_post_scoring_play/_post_final_score methods live
+# games use — a preview is guaranteed to match real output rather than
+# risking drift from a separately-maintained mockup. The Two-Point
+# Conversion sample is fabricated (that game had no 2-point attempt) using
+# a real player from the same game; everything else is as it actually
+# happened.
+_PREVIEW_GAME: dict = {
+    "sport": "nfl",
+    "home_team": "Kansas City Chiefs",
+    "away_team": "Denver Broncos",
+    "home_logo": "https://a.espncdn.com/i/teamlogos/nfl/500/scoreboard/kc.png",
+    "away_logo": "https://a.espncdn.com/i/teamlogos/nfl/500/scoreboard/den.png",
+    "is_playoff": False,
+}
+
+_PREVIEW_PLAYS: dict[str, dict] = {
+    "touchdown": {
+        "scorer": "Patrick Mahomes", "espn_player_id": 3139477,
+        "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/3139477.png",
+        "team": "Kansas City Chiefs", "type": "Rushing Touchdown",
+        "clock": "8:11", "period": 1, "yards": 15,
+    },
+    "field_goal": {
+        "scorer": "Harrison Butker", "espn_player_id": 3055899,
+        "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/3055899.png",
+        "team": "Kansas City Chiefs", "type": "Field Goal Good",
+        "clock": "3:17", "period": 3, "yards": 28,
+    },
+    "pat": {
+        "scorer": "Harrison Butker", "espn_player_id": 3055899,
+        "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/3055899.png",
+        "team": "Kansas City Chiefs", "type": "Point After Touchdown",
+        "clock": "8:11", "period": 1, "yards": None,
+    },
+    "two_point": {
+        "scorer": "Rashee Rice", "espn_player_id": 4428331,
+        "headshot_url": "https://a.espncdn.com/i/headshots/nfl/players/full/4428331.png",
+        "team": "Kansas City Chiefs", "type": "Two-Point Conversion",
+        "clock": "1:39", "period": 2, "yards": None,
+    },
+}
 
 
 class SportsScoresCog(commands.Cog, name="SportsScores"):
@@ -783,6 +860,22 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         yards = play.get("yards")
         headshot_url = play.get("headshot_url")
 
+        # Resolve the scoring team's own logo (for the author row) and the
+        # opponent's logo (as the thumbnail fallback, so the thumbnail never
+        # shows the same team the author row already names — see
+        # _apply_team_branding). NFL-only for now — other sports' scoring
+        # plays keep the no-author-branding look they've always had, same
+        # scoping as every other NFL-specific change this session.
+        scoring_team_logo = None
+        opponent_logo = None
+        if sport == "nfl":
+            if team == game.get("home_team"):
+                scoring_team_logo = game.get("home_logo")
+                opponent_logo = game.get("away_logo")
+            elif team == game.get("away_team"):
+                scoring_team_logo = game.get("away_logo")
+                opponent_logo = game.get("home_logo")
+
         # NFL-only: espn_player_id (from utils.sports_client.get_nfl_scoring_plays)
         # is the same universal ESPN athlete ID used in fantasy rosters, so a
         # direct ID lookup avoids fragile name matching between the two APIs.
@@ -795,15 +888,13 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             # "Field Goal Good" is ESPN's literal type text (kept as-is in
             # utils.sports_client for data fidelity) but reads awkwardly in
             # a sentence — display it as plain "Field Goal" here instead.
-            # "PAT" and "Two-Point Conversion" are this module's own
-            # synthesized types (see get_nfl_scoring_plays) and already
-            # display-ready as-is.
+            # "Point After Touchdown" and "Two-Point Conversion" are this
+            # module's own synthesized types (see get_nfl_scoring_plays) and
+            # already display-ready as-is.
             play_type_display = "Field Goal" if play_type == "Field Goal Good" else play_type
             verb_phrase = f"scored {_article(play_type_display)} {play_type_display}"
 
-            if fantasy_team_name and scorer:
-                title = f"{fantasy_team_name}'s player, {scorer}, {verb_phrase}"
-            elif scorer:
+            if scorer:
                 title = f"{scorer} {verb_phrase}"
             else:
                 title = f"{team} {verb_phrase}"
@@ -826,13 +917,22 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 f"— {display_home_score} {game['home_team']}"
             )
 
-        # Field goal distance is folded into the description text rather
-        # than a separate conditional field — see the "Time" field below for
-        # why NFL scoring embeds always carry exactly one field regardless
-        # of play type, keeping their shape (and box size) consistent.
-        description = score_line
+        # Fantasy team name and field goal distance are both folded into the
+        # description text (as extra lines above the score) rather than the
+        # title or a separate conditional field. Discord's title font is
+        # larger/bolder than body text, so appending the fantasy team name
+        # there (as an earlier version did) made long titles wrap to a
+        # second line far more often than short ones — a bigger source of
+        # inconsistent box size than anything field-related. Keeping the
+        # title to just "{scorer} scored a {type}" and moving variable-length
+        # extras into the description (smaller font, wraps less readily)
+        # narrows that variance.
+        detail_lines = []
+        if fantasy_team_name and scorer:
+            detail_lines.append(fantasy_team_name)
         if sport == "nfl" and play_type == "Field Goal Good" and yards is not None:
-            description = f"{yards}-yard field goal.\n\n{score_line}"
+            detail_lines.append(f"{yards}-yard field goal.")
+        description = "\n".join(detail_lines) + "\n\n" + score_line if detail_lines else score_line
 
         embed = discord.Embed(
             title=title,
@@ -860,7 +960,14 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         # benefit from the fuller footer.
         footer_parts = [label] if sport == "nfl" else [p for p in [play_type, clock, label] if p]
         embed.set_footer(text=" · ".join(p for p in footer_parts if p))
-        _apply_team_branding(embed, game, thumbnail_override=headshot_url, compact=True)
+        _apply_team_branding(
+            embed, game,
+            thumbnail_override=headshot_url,
+            compact=True,
+            author_name=team,
+            author_icon=scoring_team_logo,
+            thumbnail_fallback=opponent_logo,
+        )
         await channel.send(embed=embed)
 
     def _get_fantasy_team_name(self, guild_id: int, espn_player_id: int) -> str | None:
@@ -987,18 +1094,25 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
 
         # Determine the winner from the regulation/AET scoreline.
         # For penalty finals the regulation score is tied, so the penalty
-        # score determines the actual winner.
+        # score determines the actual winner. winner_logo drives the embed
+        # image below — only the winner's logo is shown there now, not both
+        # teams' (see that comment for why).
         if status_name == "STATUS_FINAL_PEN" and home_pen is not None and away_pen is not None:
             if home_pen > away_pen:
                 result = f"{home} wins on penalties!"
+                winner_logo = game.get("home_logo")
             else:
                 result = f"{away} wins on penalties!"
+                winner_logo = game.get("away_logo")
         elif home_score > away_score:
             result = f"{home} wins!"
+            winner_logo = game.get("home_logo")
         elif away_score > home_score:
             result = f"{away} wins!"
+            winner_logo = game.get("away_logo")
         else:
             result = "Draw!"
+            winner_logo = None
 
         embed = discord.Embed(
             title=title,
@@ -1016,21 +1130,19 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 inline=False,
             )
 
-        # Show the final elapsed time when ESPN provides it. For soccer ESPN
-        # uses a count-up clock so displayClock at full time shows "90:00" or
-        # similar; for AET/PEN it reflects the full 120 minutes. For NFL/NHL/MLB
-        # the clock counts down to "0:00" — we still show it so the user knows
-        # exactly when the game ended (e.g. "Q4 0:00"). Not available for the
-        # synthetic game dict built from DB state when a game disappears mid-poll.
-        display_clock: str = game.get("display_clock", "")
-        period: int = game.get("period", 0)
-        if display_clock:
-            time_label = _format_period_label(sport, period)
-            time_value = f"{time_label} · {display_clock}" if time_label else display_clock
-            embed.add_field(name="Time", value=time_value, inline=True)
-
         embed.set_footer(text=_season_footer(sport, game))
-        _apply_team_branding(embed, game)
+        # Only the winner's logo is shown here, at a reduced size — an
+        # earlier version showed both teams via _apply_team_branding (loser
+        # as a small top-right thumbnail, winner as a full-size bottom
+        # image), but with this embed's two fields (Result, and Penalty
+        # Score when present) sitting between them, the small thumbnail
+        # ended up floating in a visually disconnected spot relative to the
+        # much bigger image far below it (reported against a real final
+        # score on 2026-09-14). A single, moderately-sized winner logo reads
+        # more like a clean "final result" graphic and less like a mismatched
+        # pair of unrelated images.
+        if winner_logo:
+            embed.set_image(url=_resize_espn_logo(winner_logo, 300))
         await channel.send(embed=embed)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1087,6 +1199,55 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             f"**Sports:**\n{sport_lines}",
             ephemeral=True,
         )
+
+    @scores_group.command(
+        name="preview",
+        description="Post a sample score alert embed here for visual testing (admin only)",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(kind="Which type of embed to preview")
+    @app_commands.choices(kind=[
+        app_commands.Choice(name="Game starting", value="start"),
+        app_commands.Choice(name="Touchdown", value="touchdown"),
+        app_commands.Choice(name="Field goal", value="field_goal"),
+        app_commands.Choice(name="Point after touchdown", value="pat"),
+        app_commands.Choice(name="Two-point conversion", value="two_point"),
+        app_commands.Choice(name="Final score", value="final"),
+        app_commands.Choice(name="Final score (overtime)", value="final_ot"),
+    ])
+    async def scores_preview(self, interaction: discord.Interaction, kind: str) -> None:
+        """
+        Admin: Post a sample embed of the given type to the current channel.
+
+        Calls the exact same _post_game_start/_post_scoring_play/
+        _post_final_score methods live polling uses, with fabricated (but
+        real-player/real-logo) sample data — see _PREVIEW_GAME/_PREVIEW_PLAYS
+        — so a preview is guaranteed to match live output exactly rather
+        than risking drift from a separately-maintained mockup. Doesn't
+        touch the database, LiveGameState, or any fantasy roster data.
+        """
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Preview only works in a server text channel.", ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"Posting a sample '{kind}' embed below.", ephemeral=True
+        )
+
+        game = dict(_PREVIEW_GAME)
+        if kind == "start":
+            await self._post_game_start(channel, game)
+        elif kind in _PREVIEW_PLAYS:
+            await self._post_scoring_play(channel, game, dict(_PREVIEW_PLAYS[kind]), 27, 20)
+        elif kind == "final":
+            game.update(home_score=27, away_score=20, status_name="STATUS_FINAL", period=4)
+            await self._post_final_score(channel, game)
+        elif kind == "final_ot":
+            game.update(home_score=30, away_score=27, status_name="STATUS_FINAL_OT", period=5)
+            await self._post_final_score(channel, game)
 
     # ── Admin config subgroup: /scores config ─────────────────────────────────
 

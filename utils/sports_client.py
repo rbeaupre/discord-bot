@@ -595,8 +595,8 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
         headshot_url   : str | None — set under the same condition.
         team           : scoring team's display name.
         type           : short play-type label, e.g. "Passing Touchdown",
-                         "Field Goal Good", or (synthesized) "PAT" /
-                         "Two-Point Conversion".
+                         "Field Goal Good", or (synthesized) "Point After
+                         Touchdown" / "Two-Point Conversion".
         clock          : game clock at the time of the play, e.g. "4:28".
         period         : quarter number the play happened in (1-4, 5+ for
                          OT). Synthesized PAT/2-point entries inherit the
@@ -669,7 +669,7 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
         # value for them in ESPN's data (they're not their own scoringPlays
         # entry at all, see docstring).
         if pat_match:
-            plays.append(_make_play(pat_match.group("kicker"), "PAT", team, clock, period, None))
+            plays.append(_make_play(pat_match.group("kicker"), "Point After Touchdown", team, clock, period, None))
         elif two_point_pass_match:
             plays.append(_make_play(two_point_pass_match.group("receiver"), "Two-Point Conversion", team, clock, period, None))
         elif two_point_rush_match:
