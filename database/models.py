@@ -550,8 +550,9 @@ class FantasyLeagueConfig(Base):
     whether the bot's reply is ephemeral — a modal submission has no such
     public echo.
 
-    ESPN doesn't publish an expiry for these cookies; they can stop working
-    at any time. cookies_valid tracks whether the most recent refresh
+    ESPN doesn't publish an expiry for these cookies; observed behavior
+    suggests they last roughly 1-2 months, but that's not a documented
+    guarantee. cookies_valid tracks whether the most recent refresh
     succeeded, so cogs/fantasy.py can post a one-time alert on the
     valid → invalid transition instead of re-alerting on every failed daily
     refresh while the admin hasn't gotten around to rotating them yet.
@@ -624,8 +625,16 @@ class FantasyRosterEntry(Base):
     player_name = Column(String(200), nullable=False)
 
     # Display name of the fantasy team's first listed owner. Co-owned teams
-    # only surface the first owner.
+    # only surface the first owner. Stored for reference (e.g. a future
+    # /fantasy status breakdown) — live scoring alerts call out team_name
+    # below, not this, per explicit preference: the fantasy team's own name
+    # reads better in a scoring alert than the manager's personal name.
     manager_name = Column(String(200), nullable=False)
+
+    # The fantasy team's own name (e.g. "The Gridiron Gang"), as opposed to
+    # the manager's personal display name above. This is what
+    # cogs/sports_scores.py's scoring embeds actually call out.
+    team_name = Column(String(200), nullable=False)
 
     # Each player appears at most once per guild's roster snapshot.
     __table_args__ = (

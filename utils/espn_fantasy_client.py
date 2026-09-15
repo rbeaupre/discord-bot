@@ -11,10 +11,12 @@ field was missing) to diagnose a schema change if one happens.
 
 Private leagues (the common case for home/friend leagues) require two session
 cookies from a logged-in fantasy.espn.com browser session: espn_s2 and SWID.
-These are opaque, ESPN-issued tokens with no published expiry — they can stop
-working at any time, at which point every request returns
-401 AUTH_LEAGUE_NOT_VISIBLE regardless of the league's actual privacy setting.
-See cogs/fantasy.py for how the bot detects and surfaces that.
+These are opaque, ESPN-issued tokens with no officially published expiry —
+observed behavior suggests they last roughly 1-2 months, but that's not an
+ESPN-documented figure and could shift. When they do stop working, every
+request returns 401 AUTH_LEAGUE_NOT_VISIBLE regardless of the league's
+actual privacy setting. See cogs/fantasy.py for how the bot detects and
+surfaces that.
 
 Public function
 ---------------
@@ -75,6 +77,10 @@ def get_league_rosters(league_id: int, season: int, espn_s2: str, swid: str) -> 
                                 reports it.
         manager_name   : str — display name of the team's first listed
                                 owner. Co-owned teams only surface the first.
+        team_name      : str — the fantasy team's own (manager-chosen) name,
+                                e.g. "The Gridiron Gang". This is what
+                                cogs/sports_scores.py calls out in scoring
+                                alerts, not manager_name.
 
     Raises
     ------
@@ -133,6 +139,18 @@ def get_league_rosters(league_id: int, season: int, espn_s2: str, swid: str) -> 
             manager_by_guid.get(owners[0], "Unknown Manager") if owners else "Unknown Manager"
         )
 
+        # ESPN has represented the team's own (manager-chosen) name a couple
+        # of different ways across API versions: a single "name" field in
+        # newer responses, or split "location" + "nickname" fields in older
+        # ones. Try both — this hasn't been verified against a live league
+        # yet (needs real cookies to test), so if this comes back wrong or
+        # empty, check what the actual team object looks like and adjust.
+        team_name = team.get("name")
+        if not team_name:
+            team_name = f"{team.get('location', '')} {team.get('nickname', '')}".strip()
+        if not team_name:
+            team_name = "Unknown Team"
+
         for entry in team.get("roster", {}).get("entries", []):
             player = entry.get("playerPoolEntry", {}).get("player", {})
             player_id = player.get("id")
@@ -143,6 +161,7 @@ def get_league_rosters(league_id: int, season: int, espn_s2: str, swid: str) -> 
                 "espn_player_id": int(player_id),
                 "player_name": player_name,
                 "manager_name": manager_name,
+                "team_name": team_name,
             })
 
     return rosters

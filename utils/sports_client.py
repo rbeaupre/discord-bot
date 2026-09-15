@@ -58,7 +58,34 @@ _NFL_SUMMARY_URL = f"{_BASE_URL}/football/nfl/summary"
 # Rush (...)" or "Demarcus Robinson 39 Yd pass from Brock Purdy (...)" (the
 # receiver, not the passer, since they're the one who scored). Matched
 # non-greedily so a name containing a number-like token doesn't overrun.
-_SCORER_NAME_RE = re.compile(r"^(.+?) \d+ Yd ")
+# The yardage is captured too so field goal distance can be shown.
+_SCORER_NAME_RE = re.compile(r"^(?P<name>.+?) (?P<yards>\d+) Yd ")
+
+# ESPN bundles the PAT/2-point-conversion attempt into the TOUCHDOWN play's
+# own text as a trailing parenthetical rather than exposing it as its own
+# scoringPlays entry, e.g. "...(Harrison Butker Kick)" or "...(Carson Wentz
+# Pass to Justin Jefferson for Two-Point Conversion)". This regex pulls out
+# that trailing "(...)" (tolerating a stray "." after the closing paren, seen
+# in at least one real play) so it can be classified separately below.
+_TRAILING_PAREN_RE = re.compile(r"\(([^()]+)\)\.?\s*$")
+
+# Made PAT: "{Kicker} Kick". Deliberately does NOT match "{Kicker} PAT Failed"
+# or "{Kicker} PAT blocked" — those are missed attempts, worth zero fantasy
+# points, and are skipped entirely rather than announced (see
+# get_nfl_scoring_plays()).
+_PAT_MADE_RE = re.compile(r"^(?P<kicker>.+?) Kick$")
+
+# Made 2-point conversion via a pass: "{Passer} Pass to {Receiver} for
+# Two-Point Conversion". Fantasy scoring credits the receiver, not the
+# passer, same convention as a passing touchdown.
+_TWO_POINT_PASS_RE = re.compile(r"^.+? Pass to (?P<receiver>.+?) for Two-Point Conversion$")
+
+# Made 2-point conversion via a rush: "{Runner} Run for Two-Point
+# Conversion". Not observed in the data used to build this parser (only pass
+# conversions occurred), but included on the same convention as the pass
+# case; failing to match just means the conversion isn't separately
+# announced, not that anything crashes.
+_TWO_POINT_RUSH_RE = re.compile(r"^(?P<runner>.+?) (?:Run|Rush) for Two-Point Conversion$")
 
 # ESPN season type IDs for NFL, NHL, and MLB: "2" is the regular season,
 # "3" is postseason / playoffs.
@@ -528,6 +555,20 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
     match the parsed scorer name against it — no extra API call needed for
     the photo.
 
+    Made PATs and made 2-point conversions are announced as their own
+    entries, since fantasy leagues award points for both and ESPN doesn't
+    expose them as their own scoringPlays entries — it bundles the attempt
+    into a trailing parenthetical on the touchdown play's own text (e.g.
+    "...(Harrison Butker Kick)" or "...(Carson Wentz Pass to Justin
+    Jefferson for Two-Point Conversion)"). We parse that suffix and, only on
+    a made attempt, synthesize a second play entry immediately after the
+    touchdown's — see _PAT_MADE_RE / _TWO_POINT_PASS_RE / _TWO_POINT_RUSH_RE.
+    Missed/blocked PATs and failed 2-point conversions score zero fantasy
+    points, so they're deliberately NOT announced — the suffix simply fails
+    to match any of those patterns and nothing extra is added. Field goals
+    never carry this suffix (there's no PAT after a field goal) and are
+    unaffected.
+
     A parse or match failure just leaves the affected field(s) empty/None
     rather than raising — callers already treat a missing scorer name as "no
     attribution available" (see cogs/sports_scores.py), so this degrades
@@ -539,18 +580,28 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
 
     Returns
     -------
-    list[dict], one entry per scoring play, in chronological order:
+    list[dict], one entry per scoring play (including synthesized PAT/2-point
+    entries), in chronological order:
         index          : position in this list. Used the same way as the
                          raw details-array index elsewhere in this module —
                          to detect which plays are new since the last poll.
+                         Recomputed fresh every call, but stable across polls
+                         because the same historical plays always parse to
+                         the same number of entries in the same order.
         scorer         : player's full name, or "" if the text didn't match
                          the expected pattern.
         espn_player_id : int | None — set only when the parsed name matched
                          an athlete in this game's boxscore.
         headshot_url   : str | None — set under the same condition.
         team           : scoring team's display name.
-        type           : short play-type label, e.g. "Passing Touchdown".
+        type           : short play-type label, e.g. "Passing Touchdown",
+                         "Field Goal Good", or (synthesized) "PAT" /
+                         "Two-Point Conversion".
         clock          : game clock at the time of the play, e.g. "4:28".
+        yards          : int | None — yardage parsed from the play text
+                         (e.g. field goal distance). None for synthesized
+                         PAT/2-point entries, which have no yardage of
+                         their own.
 
     Raises
     ------
@@ -571,23 +622,52 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
                 headshot_url = athlete.get("headshot", {}).get("href")
                 athlete_by_name[name] = (int(athlete_id), headshot_url)
 
-    plays: list[dict] = []
-    for i, sp in enumerate(data.get("scoringPlays", [])):
-        text = sp.get("text", "")
-        match = _SCORER_NAME_RE.match(text)
-        scorer = match.group(1) if match else ""
-
+    def _make_play(scorer: str, play_type: str, team: str, clock: str, yards: int | None) -> dict:
         athlete_id, headshot_url = athlete_by_name.get(scorer, (None, None))
-
-        plays.append({
-            "index": i,
+        return {
             "scorer": scorer,
             "espn_player_id": athlete_id,
             "headshot_url": headshot_url,
-            "team": sp.get("team", {}).get("displayName", ""),
-            "type": sp.get("type", {}).get("text", ""),
-            "clock": sp.get("clock", {}).get("displayValue", ""),
-        })
+            "team": team,
+            "type": play_type,
+            "clock": clock,
+            "yards": yards,
+        }
+
+    plays: list[dict] = []
+    for sp in data.get("scoringPlays", []):
+        text = sp.get("text", "")
+        team = sp.get("team", {}).get("displayName", "")
+        clock = sp.get("clock", {}).get("displayValue", "")
+
+        match = _SCORER_NAME_RE.match(text)
+        scorer = match.group("name") if match else ""
+        yards = int(match.group("yards")) if match else None
+
+        plays.append(_make_play(scorer, sp.get("type", {}).get("text", ""), team, clock, yards))
+
+        # Check the trailing "(...)" for a made PAT or 2-point conversion to
+        # announce as its own entry. Anything that doesn't match one of
+        # these (missed/blocked kicks, failed conversions, or no suffix at
+        # all, e.g. field goals) is silently skipped — see docstring.
+        suffix_match = _TRAILING_PAREN_RE.search(text)
+        if not suffix_match:
+            continue
+        suffix = suffix_match.group(1).strip()
+
+        pat_match = _PAT_MADE_RE.match(suffix)
+        two_point_pass_match = _TWO_POINT_PASS_RE.match(suffix)
+        two_point_rush_match = _TWO_POINT_RUSH_RE.match(suffix)
+
+        if pat_match:
+            plays.append(_make_play(pat_match.group("kicker"), "PAT", team, clock, None))
+        elif two_point_pass_match:
+            plays.append(_make_play(two_point_pass_match.group("receiver"), "Two-Point Conversion", team, clock, None))
+        elif two_point_rush_match:
+            plays.append(_make_play(two_point_rush_match.group("runner"), "Two-Point Conversion", team, clock, None))
+
+    for index, play in enumerate(plays):
+        play["index"] = index
 
     return plays
 

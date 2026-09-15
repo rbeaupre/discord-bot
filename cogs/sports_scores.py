@@ -189,13 +189,19 @@ def _apply_team_branding(
     embed: discord.Embed, game: dict, thumbnail_override: str | None = None
 ) -> None:
     """
-    Attach both teams' logos to an embed: the home team's logo as the small
-    author icon (top-left), and either thumbnail_override (e.g. a scoring
+    Attach both teams' logos to an embed: the home team's logo as the large
+    embed image (bottom), and either thumbnail_override (e.g. a scoring
     play's player headshot) or the away team's logo as the thumbnail
-    (top-right). A Discord embed only has one author-icon slot and one
+    (top-right). A Discord embed only has one large-image slot and one
     thumbnail slot, so this is the pairing that fits both logos on a
     scoring-play embed without displacing the player headshot it already
     uses the thumbnail for.
+
+    An earlier version used the small author-icon slot for the home logo
+    instead of the large image slot — technically present, but so much
+    smaller than the away logo's thumbnail that it read as "only one team's
+    logo is showing" (reported against a real game on 2026-09-14). Swapped
+    to set_image() so both logos render at comparable size.
 
     game["home_logo"]/["away_logo"] are set by utils.sports_client for every
     game dict freshly fetched from ESPN. They're absent on the synthetic dict
@@ -209,11 +215,16 @@ def _apply_team_branding(
     away_logo = game.get("away_logo")
 
     if home_logo:
-        embed.set_author(name=f"{game.get('away_team', '')} @ {game.get('home_team', '')}", icon_url=home_logo)
+        embed.set_image(url=home_logo)
 
     thumbnail_url = thumbnail_override or away_logo
     if thumbnail_url:
         embed.set_thumbnail(url=thumbnail_url)
+
+
+def _article(phrase: str) -> str:
+    """Return "an" if phrase starts with a vowel sound, else "a"."""
+    return "an" if phrase[:1].upper() in "AEIOU" else "a"
 
 
 def _job_id(guild_id: int, sport: str) -> str:
@@ -582,11 +593,23 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                     # post a generic score update so the channel is never left showing
                     # a stale scoreline. This covers the lag window where ESPN updates
                     # the score field before populating the details array.
+                    #
+                    # Excluded for NFL: NFL doesn't use the details array at all (see
+                    # get_nfl_scoring_plays()), and that function now accounts for
+                    # every scoring event that changes the score — touchdowns, field
+                    # goals, made PATs, and made 2-point conversions — so a genuine
+                    # "score changed with nothing new in scoring_plays" gap shouldn't
+                    # occur for NFL anymore. Posting this generic, unattributed
+                    # fallback anyway was producing a duplicate-looking second embed
+                    # for the same score change right after the attributed one.
+                    # NHL/MLB/soccer are unaffected and keep this safety net, since
+                    # their scoring_plays still comes from the details array, where
+                    # this lag is a real, documented behavior (see _post_score_update).
                     score_changed = (
                         game["home_score"] != row.home_score
                         or game["away_score"] != row.away_score
                     )
-                    if not new_plays and score_changed:
+                    if sport != "nfl" and not new_plays and score_changed:
                         await self._post_score_update(channel, game)
 
                     # Advance last_play_index to the most recent play we processed.
@@ -747,21 +770,33 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         team = play.get("team") or ""
         play_type = play.get("type") or "Score"
         clock = play.get("clock") or ""
+        yards = play.get("yards")
         headshot_url = play.get("headshot_url")
 
         # NFL-only: espn_player_id (from utils.sports_client.get_nfl_scoring_plays)
         # is the same universal ESPN athlete ID used in fantasy rosters, so a
         # direct ID lookup avoids fragile name matching between the two APIs.
-        fantasy_manager = None
+        fantasy_team_name = None
         espn_player_id = play.get("espn_player_id")
         if sport == "nfl" and espn_player_id is not None:
-            fantasy_manager = self._get_fantasy_manager(channel.guild.id, espn_player_id)
+            fantasy_team_name = self._get_fantasy_team_name(channel.guild.id, espn_player_id)
 
-        # Use the player name when available; fall back to the team name.
-        # When the scorer is on a tracked fantasy roster, lead with the
-        # manager's name instead of a bare player name.
-        if fantasy_manager and scorer:
-            title = f"{fantasy_manager}'s player, {scorer}, scores!"
+        if sport == "nfl":
+            # "Field Goal Good" is ESPN's literal type text (kept as-is in
+            # utils.sports_client for data fidelity) but reads awkwardly in
+            # a sentence — display it as plain "Field Goal" here instead.
+            # "PAT" and "Two-Point Conversion" are this module's own
+            # synthesized types (see get_nfl_scoring_plays) and already
+            # display-ready as-is.
+            play_type_display = "Field Goal" if play_type == "Field Goal Good" else play_type
+            verb_phrase = f"scored {_article(play_type_display)} {play_type_display}"
+
+            if fantasy_team_name and scorer:
+                title = f"{fantasy_team_name}'s player, {scorer}, {verb_phrase}"
+            elif scorer:
+                title = f"{scorer} {verb_phrase}"
+            else:
+                title = f"{team} {verb_phrase}"
         elif scorer:
             title = f"{scorer} scores!"
         else:
@@ -787,19 +822,26 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
+        # Field goal distance, shown separately from the title per how the
+        # rest of this embed already surfaces secondary detail (e.g. the
+        # final-score embed's "Time" field) rather than crowding the title.
+        if sport == "nfl" and play_type == "Field Goal Good" and yards is not None:
+            embed.add_field(name="Distance", value=f"{yards} yards", inline=True)
         footer_parts = [p for p in [play_type, clock, label] if p]
         embed.set_footer(text=" · ".join(footer_parts))
         _apply_team_branding(embed, game, thumbnail_override=headshot_url)
         await channel.send(embed=embed)
 
-    def _get_fantasy_manager(self, guild_id: int, espn_player_id: int) -> str | None:
+    def _get_fantasy_team_name(self, guild_id: int, espn_player_id: int) -> str | None:
         """
-        Look up which fantasy manager (if any) owns this player in the
-        guild's cached ESPN Fantasy roster snapshot — see cogs/fantasy.py,
-        which populates fantasy_roster_entries on a daily refresh. Returns
-        None if the fantasy feature isn't configured for this guild, or the
-        player isn't on anyone's roster (free agent, or on a bench/team not
-        in this league at all).
+        Look up which fantasy team (if any) owns this player in the guild's
+        cached ESPN Fantasy roster snapshot — see cogs/fantasy.py, which
+        populates fantasy_roster_entries on a daily refresh. Returns the
+        team's own name (e.g. "The Gridiron Gang"), not the manager's
+        personal display name — that's what gets called out in the scoring
+        embed. Returns None if the fantasy feature isn't configured for this
+        guild, or the player isn't on anyone's roster (free agent, or on a
+        team not in this league at all).
         """
         with SessionLocal() as session:
             entry = (
@@ -807,7 +849,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 .filter_by(guild_id=guild_id, espn_player_id=espn_player_id)
                 .first()
             )
-            return entry.manager_name if entry else None
+            return entry.team_name if entry else None
 
     async def _post_score_update(
         self,
