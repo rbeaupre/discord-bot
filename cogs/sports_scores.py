@@ -55,6 +55,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_CHANNEL_NAME = "sports-updates"
 _ALL_SPORTS = ["nfl", "nhl", "mlb", "soccer"]
 
+# Pixel size for the winning team's logo on the final score embed (via
+# _resize_espn_logo) — ESPN's native team logos are 500x500, which renders
+# far too large for a "final result" accent image. Tuned down from an
+# initial 300 (still read as "very large" against a real embed) to 150 —
+# adjust here if it still needs further tuning; there's no way to preview
+# the actual rendered size without checking Discord itself.
+_FINAL_SCORE_LOGO_SIZE = 150
+
 # Per-sport polling intervals in seconds. NFL gets a short interval so that a
 # touchdown and the following PAT can land in separate embeds — ESPN sometimes
 # batches them together in the details array within a 20-40 second window.
@@ -819,7 +827,22 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(text=_season_footer(sport, game))
-        _apply_team_branding(embed, game)
+        # Both teams shown via the two small slots (author icon + thumbnail)
+        # rather than the large-image branding _apply_team_branding's default
+        # mode uses — that pairs one team's logo as a small thumbnail with
+        # the other's as a much bigger bottom image, which reads as visually
+        # disconnected (same root cause identified and fixed for the final
+        # score embed; reported here against a real game on 2026-09-15).
+        # Neither team is more "relevant" than the other at kickoff (unlike
+        # a scoring play's scoring team, or a final score's winner), so both
+        # get equal, comparably-sized treatment instead of picking one.
+        _apply_team_branding(
+            embed, game,
+            compact=True,
+            author_name=game.get("away_team"),
+            author_icon=game.get("away_logo"),
+            thumbnail_fallback=game.get("home_logo"),
+        )
         await channel.send(embed=embed)
 
     async def _post_scoring_play(
@@ -1142,7 +1165,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         # more like a clean "final result" graphic and less like a mismatched
         # pair of unrelated images.
         if winner_logo:
-            embed.set_image(url=_resize_espn_logo(winner_logo, 300))
+            embed.set_image(url=_resize_espn_logo(winner_logo, _FINAL_SCORE_LOGO_SIZE))
         await channel.send(embed=embed)
 
     # ──────────────────────────────────────────────────────────────────────────
