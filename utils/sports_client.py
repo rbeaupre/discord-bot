@@ -598,6 +598,9 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
                          "Field Goal Good", or (synthesized) "PAT" /
                          "Two-Point Conversion".
         clock          : game clock at the time of the play, e.g. "4:28".
+        period         : quarter number the play happened in (1-4, 5+ for
+                         OT). Synthesized PAT/2-point entries inherit the
+                         parent touchdown's period.
         yards          : int | None — yardage parsed from the play text
                          (e.g. field goal distance). None for synthesized
                          PAT/2-point entries, which have no yardage of
@@ -622,7 +625,7 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
                 headshot_url = athlete.get("headshot", {}).get("href")
                 athlete_by_name[name] = (int(athlete_id), headshot_url)
 
-    def _make_play(scorer: str, play_type: str, team: str, clock: str, yards: int | None) -> dict:
+    def _make_play(scorer: str, play_type: str, team: str, clock: str, period: int, yards: int | None) -> dict:
         athlete_id, headshot_url = athlete_by_name.get(scorer, (None, None))
         return {
             "scorer": scorer,
@@ -631,6 +634,7 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
             "team": team,
             "type": play_type,
             "clock": clock,
+            "period": period,
             "yards": yards,
         }
 
@@ -639,12 +643,13 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
         text = sp.get("text", "")
         team = sp.get("team", {}).get("displayName", "")
         clock = sp.get("clock", {}).get("displayValue", "")
+        period = sp.get("period", {}).get("number", 0)
 
         match = _SCORER_NAME_RE.match(text)
         scorer = match.group("name") if match else ""
         yards = int(match.group("yards")) if match else None
 
-        plays.append(_make_play(scorer, sp.get("type", {}).get("text", ""), team, clock, yards))
+        plays.append(_make_play(scorer, sp.get("type", {}).get("text", ""), team, clock, period, yards))
 
         # Check the trailing "(...)" for a made PAT or 2-point conversion to
         # announce as its own entry. Anything that doesn't match one of
@@ -659,12 +664,16 @@ def get_nfl_scoring_plays(game_id: str) -> list[dict]:
         two_point_pass_match = _TWO_POINT_PASS_RE.match(suffix)
         two_point_rush_match = _TWO_POINT_RUSH_RE.match(suffix)
 
+        # PAT/2-point attempts happen on the very next snap after the
+        # touchdown, so they share its period — there's no separate period
+        # value for them in ESPN's data (they're not their own scoringPlays
+        # entry at all, see docstring).
         if pat_match:
-            plays.append(_make_play(pat_match.group("kicker"), "PAT", team, clock, None))
+            plays.append(_make_play(pat_match.group("kicker"), "PAT", team, clock, period, None))
         elif two_point_pass_match:
-            plays.append(_make_play(two_point_pass_match.group("receiver"), "Two-Point Conversion", team, clock, None))
+            plays.append(_make_play(two_point_pass_match.group("receiver"), "Two-Point Conversion", team, clock, period, None))
         elif two_point_rush_match:
-            plays.append(_make_play(two_point_rush_match.group("runner"), "Two-Point Conversion", team, clock, None))
+            plays.append(_make_play(two_point_rush_match.group("runner"), "Two-Point Conversion", team, clock, period, None))
 
     for index, play in enumerate(plays):
         play["index"] = index

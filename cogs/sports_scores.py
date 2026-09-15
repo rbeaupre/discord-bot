@@ -779,6 +779,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         team = play.get("team") or ""
         play_type = play.get("type") or "Score"
         clock = play.get("clock") or ""
+        period = play.get("period", 0)
         yards = play.get("yards")
         headshot_url = play.get("headshot_url")
 
@@ -825,19 +826,40 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 f"— {display_home_score} {game['home_team']}"
             )
 
+        # Field goal distance is folded into the description text rather
+        # than a separate conditional field — see the "Time" field below for
+        # why NFL scoring embeds always carry exactly one field regardless
+        # of play type, keeping their shape (and box size) consistent.
+        description = score_line
+        if sport == "nfl" and play_type == "Field Goal Good" and yards is not None:
+            description = f"{yards}-yard field goal.\n\n{score_line}"
+
         embed = discord.Embed(
             title=title,
-            description=score_line,
+            description=description,
             color=discord.Color.orange(),
             timestamp=datetime.now(timezone.utc),
         )
-        # Field goal distance, shown separately from the title per how the
-        # rest of this embed already surfaces secondary detail (e.g. the
-        # final-score embed's "Time" field) rather than crowding the title.
-        if sport == "nfl" and play_type == "Field Goal Good" and yards is not None:
-            embed.add_field(name="Distance", value=f"{yards} yards", inline=True)
-        footer_parts = [p for p in [play_type, clock, label] if p]
-        embed.set_footer(text=" · ".join(footer_parts))
+        # Every NFL scoring embed gets a "Time" field (quarter + game clock),
+        # regardless of play type — unlike the earlier field-goal-only
+        # Distance field, this is unconditional for NFL, so every scoring
+        # embed has the same shape instead of some having an extra field
+        # block and others not (that inconsistency was making the embeds'
+        # box sizes look mismatched in the channel).
+        if sport == "nfl":
+            period_label = _format_period_label(sport, period)
+            time_value = f"{period_label} · {clock}" if period_label else clock
+            if time_value:
+                embed.add_field(name="Time", value=time_value, inline=True)
+
+        # For NFL, the title already states the play type ("scored a Rushing
+        # Touchdown") and the clock now lives in the Time field above, so
+        # repeating either in the footer would be redundant — just the
+        # league label remains. Other sports' titles don't include the play
+        # type ("{scorer} scores!") and have no Time field, so they still
+        # benefit from the fuller footer.
+        footer_parts = [label] if sport == "nfl" else [p for p in [play_type, clock, label] if p]
+        embed.set_footer(text=" · ".join(p for p in footer_parts if p))
         _apply_team_branding(embed, game, thumbnail_override=headshot_url, compact=True)
         await channel.send(embed=embed)
 
