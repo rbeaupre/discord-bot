@@ -186,22 +186,25 @@ def _season_footer(sport: str, game: dict) -> str:
 
 
 def _apply_team_branding(
-    embed: discord.Embed, game: dict, thumbnail_override: str | None = None
+    embed: discord.Embed, game: dict, thumbnail_override: str | None = None, compact: bool = False
 ) -> None:
     """
-    Attach both teams' logos to an embed: the home team's logo as the large
-    embed image (bottom), and either thumbnail_override (e.g. a scoring
-    play's player headshot) or the away team's logo as the thumbnail
-    (top-right). A Discord embed only has one large-image slot and one
-    thumbnail slot, so this is the pairing that fits both logos on a
-    scoring-play embed without displacing the player headshot it already
-    uses the thumbnail for.
+    Attach both teams' logos to an embed: the home team's logo, and either
+    thumbnail_override (e.g. a scoring play's player headshot) or the away
+    team's logo as the thumbnail (top-right).
 
-    An earlier version used the small author-icon slot for the home logo
-    instead of the large image slot — technically present, but so much
-    smaller than the away logo's thumbnail that it read as "only one team's
-    logo is showing" (reported against a real game on 2026-09-14). Swapped
-    to set_image() so both logos render at comparable size.
+    compact controls where the home logo goes, since a Discord embed only
+    has one large-image slot and one thumbnail slot:
+      - False (default; game start, score update, final score — posted a
+        handful of times per game): home logo in the large embed image
+        (bottom). Gives both teams comparable visual weight for these
+        lower-frequency, more "event"-like embeds.
+      - True (scoring plays — posted every time anyone scores, so several
+        times a game): home logo in the small author icon (top-left)
+        instead. set_image() always renders as a large banner in Discord
+        regardless of the source image's actual resolution — fine
+        occasionally, but overwhelming when it repeats on every touchdown,
+        field goal, and PAT (reported against a real game on 2026-09-14).
 
     game["home_logo"]/["away_logo"] are set by utils.sports_client for every
     game dict freshly fetched from ESPN. They're absent on the synthetic dict
@@ -215,7 +218,13 @@ def _apply_team_branding(
     away_logo = game.get("away_logo")
 
     if home_logo:
-        embed.set_image(url=home_logo)
+        if compact:
+            embed.set_author(
+                name=f"{game.get('away_team', '')} @ {game.get('home_team', '')}",
+                icon_url=home_logo,
+            )
+        else:
+            embed.set_image(url=home_logo)
 
     thumbnail_url = thumbnail_override or away_logo
     if thumbnail_url:
@@ -829,7 +838,7 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             embed.add_field(name="Distance", value=f"{yards} yards", inline=True)
         footer_parts = [p for p in [play_type, clock, label] if p]
         embed.set_footer(text=" · ".join(footer_parts))
-        _apply_team_branding(embed, game, thumbnail_override=headshot_url)
+        _apply_team_branding(embed, game, thumbnail_override=headshot_url, compact=True)
         await channel.send(embed=embed)
 
     def _get_fantasy_team_name(self, guild_id: int, espn_player_id: int) -> str | None:
