@@ -975,17 +975,17 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         # narrows that variance.
         detail_lines = []
         if fantasy_team_name and scorer:
-            # Bold + underlined, and linked to the team's fantasy.espn.com
-            # page when we know its ESPN team ID (see _get_fantasy_team_info).
-            # No text color: Discord embed markdown has no way to set
-            # arbitrary text color (that's limited to ANSI codes inside a
-            # ```ansi code block, which would force the whole line into a
-            # monospaced, boxed code-block style rather than just coloring
-            # these few words) — bold+underline+link was chosen instead as
-            # the strongest emphasis available without that trade-off.
-            fantasy_line = f"**__{fantasy_team_name}__**"
+            # Bold, and linked to the team's fantasy.espn.com page when we
+            # know its ESPN team ID (see _get_fantasy_team_info). Underline
+            # was tried too but dropped — bold+underline+link together read
+            # as too busy in practice. No text color: Discord embed markdown
+            # has no way to set arbitrary text color (that's limited to ANSI
+            # codes inside a ```ansi code block, which would force the whole
+            # line into a monospaced, boxed code-block style rather than
+            # just coloring these few words).
+            fantasy_line = f"**{fantasy_team_name}**"
             if fantasy_team_url:
-                fantasy_line = f"**__[{fantasy_team_name}]({fantasy_team_url})__**"
+                fantasy_line = f"**[{fantasy_team_name}]({fantasy_team_url})**"
             detail_lines.append(fantasy_line)
         if sport == "nfl" and play_type == "Field Goal Good" and yards is not None:
             detail_lines.append(f"{yards}-yard field goal.")
