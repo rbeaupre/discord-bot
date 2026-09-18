@@ -233,6 +233,7 @@ class FantasyCog(commands.Cog, name="Fantasy"):
                     player_name=entry["player_name"],
                     manager_name=entry["manager_name"],
                     team_name=entry["team_name"],
+                    espn_team_id=entry.get("espn_team_id"),
                 ))
             fresh_cfg = session.get(FantasyLeagueConfig, league_cfg.id)
             fresh_cfg.last_refreshed_at = datetime.utcnow()

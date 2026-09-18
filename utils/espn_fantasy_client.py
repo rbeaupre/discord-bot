@@ -81,6 +81,9 @@ def get_league_rosters(league_id: int, season: int, espn_s2: str, swid: str) -> 
                                 e.g. "The Gridiron Gang". This is what
                                 cogs/sports_scores.py calls out in scoring
                                 alerts, not manager_name.
+        espn_team_id   : int | None — ESPN's numeric team ID within this
+                                league, used to link to the team's page on
+                                fantasy.espn.com.
 
     Raises
     ------
@@ -142,14 +145,16 @@ def get_league_rosters(league_id: int, season: int, espn_s2: str, swid: str) -> 
         # ESPN has represented the team's own (manager-chosen) name a couple
         # of different ways across API versions: a single "name" field in
         # newer responses, or split "location" + "nickname" fields in older
-        # ones. Try both — this hasn't been verified against a live league
-        # yet (needs real cookies to test), so if this comes back wrong or
-        # empty, check what the actual team object looks like and adjust.
+        # ones. Try both — verified team.get("name") works against a real
+        # live league on 2026-09-14; the location/nickname fallback is
+        # untested but kept for older API versions that might lack "name".
         team_name = team.get("name")
         if not team_name:
             team_name = f"{team.get('location', '')} {team.get('nickname', '')}".strip()
         if not team_name:
             team_name = "Unknown Team"
+
+        espn_team_id = team.get("id")
 
         for entry in team.get("roster", {}).get("entries", []):
             player = entry.get("playerPoolEntry", {}).get("player", {})
@@ -162,6 +167,7 @@ def get_league_rosters(league_id: int, season: int, espn_s2: str, swid: str) -> 
                 "player_name": player_name,
                 "manager_name": manager_name,
                 "team_name": team_name,
+                "espn_team_id": espn_team_id,
             })
 
     return rosters

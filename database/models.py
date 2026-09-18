@@ -636,6 +636,12 @@ class FantasyRosterEntry(Base):
     # cogs/sports_scores.py's scoring embeds actually call out.
     team_name = Column(String(200), nullable=False)
 
+    # ESPN's numeric team ID within the league — used to build a link to the
+    # team's page on fantasy.espn.com. Nullable in case a future ESPN API
+    # response is ever missing it; a roster entry without a team ID just
+    # means the scoring alert can't link out, not that it fails outright.
+    espn_team_id = Column(Integer, nullable=True)
+
     # Each player appears at most once per guild's roster snapshot.
     __table_args__ = (
         UniqueConstraint("guild_id", "espn_player_id", name="uq_guild_fantasy_player"),

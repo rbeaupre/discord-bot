@@ -41,7 +41,7 @@ from discord.ext import commands
 from sqlalchemy.exc import IntegrityError
 
 from database.db import SessionLocal
-from database.models import FantasyRosterEntry, LiveGameState, ScheduleConfig
+from database.models import FantasyLeagueConfig, FantasyRosterEntry, LiveGameState, ScheduleConfig
 from utils.sports_client import (
     ACTIVE_STATUSES,
     FINAL_STATUSES,
@@ -62,6 +62,16 @@ _ALL_SPORTS = ["nfl", "nhl", "mlb", "soccer"]
 # adjust here if it still needs further tuning; there's no way to preview
 # the actual rendered size without checking Discord itself.
 _FINAL_SCORE_LOGO_SIZE = 150
+
+# Maps ESPN's literal NFL play-type text to how it should read in a sentence
+# crediting the specific scorer — see the comment where this is used in
+# _post_scoring_play for why "Passing Touchdown" becomes "Receiving
+# Touchdown". Anything not listed here (Rushing Touchdown, Interception
+# Return Touchdown, etc.) is already display-ready as ESPN's literal text.
+_NFL_PLAY_TYPE_DISPLAY = {
+    "Field Goal Good": "Field Goal",
+    "Passing Touchdown": "Receiving Touchdown",
+}
 
 # Per-sport polling intervals in seconds. NFL gets a short interval so that a
 # touchdown and the following PAT can land in separate embeds — ESPN sometimes
@@ -224,29 +234,37 @@ def _apply_team_branding(
     author-icon slot, and one thumbnail slot, so different embed types use
     different combinations:
 
-      - False (default; game start, score update, final score — posted a
-        handful of times per game): home team's logo in the large embed
-        image (bottom), away team's logo (or thumbnail_override) in the
-        thumbnail (top-right). Both teams get comparable visual weight for
-        these lower-frequency, more "event"-like embeds. author_name/
-        author_icon are ignored in this mode.
-      - True (scoring plays — posted every time anyone scores, so several
-        times a game): author_name/author_icon (the specific team that just
-        scored, and its logo — resolved by the caller, since this function
-        only knows the game's home/away teams, not which one scored) go in
-        the small author row instead of any home/away branding. Two earlier
-        versions tried an "Away @ Home" matchup line with the home logo,
-        then removed team branding from scoring plays entirely — both read
-        oddly (a lone small logo with nothing matching on the other side,
-        for info the score line already states). Naming the actual scoring
-        team is more useful there than either.
+      - False (default; only _post_score_update — NHL/MLB/soccer's
+        unattributed score-change fallback — still uses this): home team's
+        logo in the large embed image (bottom), away team's logo (or
+        thumbnail_override) in the thumbnail (top-right). author_name/
+        author_icon are ignored in this mode. Game start and final score
+        used to use this mode too, but a large image paired with a small,
+        spatially-distant thumbnail read as two disconnected, mismatched
+        logos rather than one coherent graphic (reported against real
+        games) — game start now builds its own compact-style author+
+        thumbnail call instead, and final score shows only the winner's
+        logo, resized down, with no _apply_team_branding call at all.
+      - True (scoring plays, and game start): author_name/author_icon go in
+        the small author row instead of any home/away branding — for
+        scoring plays this is the team that just scored (resolved by the
+        caller, since this function only knows the game's home/away teams,
+        not which one scored); for game start it's simply the away team,
+        since neither team is more relevant than the other before kickoff.
+        Multiple earlier versions of the scoring-play case (an "Away @
+        Home" matchup line, then no branding at all) read oddly compared to
+        just naming the specific team that scored.
 
     thumbnail_override takes priority in the thumbnail slot (a scoring
-    play's player headshot, when known); thumbnail_fallback is used next
-    (the caller passes the *opposing* team's logo for scoring plays, so the
-    thumbnail never repeats the same team the author row already names);
-    game["away_logo"] is the last resort, used by the non-compact embeds
-    that don't pass thumbnail_fallback at all.
+    play's player headshot, when known); thumbnail_fallback is used next —
+    for scoring plays the caller passes the *scoring* team's own logo here
+    (not the opponent's, despite the author row already showing it — an
+    earlier version used the opponent's logo instead, but that misleadingly
+    looked like the other team had scored whenever a player had no
+    headshot on file, reported against a real game on 2026-09-17); for game
+    start the caller passes the home team's logo. game["away_logo"] is the
+    last resort, used only by the non-compact _post_score_update path that
+    doesn't pass thumbnail_fallback at all.
 
     game["home_logo"]/["away_logo"] are set by utils.sports_client for every
     game dict freshly fetched from ESPN. They're absent on the synthetic dict
@@ -827,22 +845,17 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             timestamp=datetime.now(timezone.utc),
         )
         embed.set_footer(text=_season_footer(sport, game))
-        # Both teams shown via the two small slots (author icon + thumbnail)
-        # rather than the large-image branding _apply_team_branding's default
-        # mode uses — that pairs one team's logo as a small thumbnail with
-        # the other's as a much bigger bottom image, which reads as visually
-        # disconnected (same root cause identified and fixed for the final
-        # score embed; reported here against a real game on 2026-09-15).
-        # Neither team is more "relevant" than the other at kickoff (unlike
-        # a scoring play's scoring team, or a final score's winner), so both
-        # get equal, comparably-sized treatment instead of picking one.
-        _apply_team_branding(
-            embed, game,
-            compact=True,
-            author_name=game.get("away_team"),
-            author_icon=game.get("away_logo"),
-            thumbnail_fallback=game.get("home_logo"),
-        )
+        # No team logos at all here — two earlier attempts (large image +
+        # thumbnail, then author icon + thumbnail) both put the two teams'
+        # logos in differently-sized slots (Discord's author icon and
+        # thumbnail render at noticeably different sizes, and neither
+        # matches the large image slot), which repeatedly read as
+        # mismatched/disconnected branding rather than one coherent graphic
+        # (reported against real games on 2026-09-15 and 2026-09-17). The
+        # title/description already say everything that matters — emoji,
+        # "Game Starting", and which two teams are playing — so team
+        # branding was dropped here entirely rather than trying a fourth
+        # combination of Discord's inherently mismatched image slots.
         await channel.send(embed=embed)
 
     async def _post_scoring_play(
@@ -883,38 +896,48 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         yards = play.get("yards")
         headshot_url = play.get("headshot_url")
 
-        # Resolve the scoring team's own logo (for the author row) and the
-        # opponent's logo (as the thumbnail fallback, so the thumbnail never
-        # shows the same team the author row already names — see
-        # _apply_team_branding). NFL-only for now — other sports' scoring
-        # plays keep the no-author-branding look they've always had, same
-        # scoping as every other NFL-specific change this session.
+        # Resolve the scoring team's own logo, for the author row and as the
+        # thumbnail fallback when the scorer has no headshot on file. An
+        # earlier version used the OPPONENT's logo as that fallback (to
+        # avoid the same team appearing in both slots), but that meant a
+        # photo-less player's embed showed the wrong team's branding in the
+        # thumbnail — misleading, since it looked like the other team had
+        # scored (reported against a real Joshua Palmer touchdown on
+        # 2026-09-17). Showing the scorer's own team logo twice is a better
+        # trade-off than showing the wrong team once. NFL-only for now —
+        # other sports' scoring plays keep the no-author-branding look
+        # they've always had, same scoping as every other NFL-specific
+        # change this session.
         scoring_team_logo = None
-        opponent_logo = None
         if sport == "nfl":
             if team == game.get("home_team"):
                 scoring_team_logo = game.get("home_logo")
-                opponent_logo = game.get("away_logo")
             elif team == game.get("away_team"):
                 scoring_team_logo = game.get("away_logo")
-                opponent_logo = game.get("home_logo")
 
         # NFL-only: espn_player_id (from utils.sports_client.get_nfl_scoring_plays)
         # is the same universal ESPN athlete ID used in fantasy rosters, so a
         # direct ID lookup avoids fragile name matching between the two APIs.
         fantasy_team_name = None
+        fantasy_team_url = None
         espn_player_id = play.get("espn_player_id")
         if sport == "nfl" and espn_player_id is not None:
-            fantasy_team_name = self._get_fantasy_team_name(channel.guild.id, espn_player_id)
+            fantasy_info = self._get_fantasy_team_info(channel.guild.id, espn_player_id)
+            if fantasy_info:
+                fantasy_team_name, fantasy_team_url = fantasy_info
 
         if sport == "nfl":
-            # "Field Goal Good" is ESPN's literal type text (kept as-is in
-            # utils.sports_client for data fidelity) but reads awkwardly in
-            # a sentence — display it as plain "Field Goal" here instead.
-            # "Point After Touchdown" and "Two-Point Conversion" are this
-            # module's own synthesized types (see get_nfl_scoring_plays) and
-            # already display-ready as-is.
-            play_type_display = "Field Goal" if play_type == "Field Goal Good" else play_type
+            # ESPN's literal type text is kept as-is in utils.sports_client
+            # for data fidelity, but a couple of them need reframing for a
+            # sentence crediting the SCORER specifically (not just "the
+            # play"): "Field Goal Good" reads awkwardly verbatim, and
+            # "Passing Touchdown" describes the passer's role, but the
+            # scorer credited here is always the receiver (see
+            # utils.sports_client._SCORER_NAME_RE) — "Receiving Touchdown"
+            # matches who actually scored. "Point After Touchdown" and
+            # "Two-Point Conversion" are this module's own synthesized types
+            # (see get_nfl_scoring_plays) and already display-ready as-is.
+            play_type_display = _NFL_PLAY_TYPE_DISPLAY.get(play_type, play_type)
             verb_phrase = f"scored {_article(play_type_display)} {play_type_display}"
 
             if scorer:
@@ -952,7 +975,18 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
         # narrows that variance.
         detail_lines = []
         if fantasy_team_name and scorer:
-            detail_lines.append(fantasy_team_name)
+            # Bold + underlined, and linked to the team's fantasy.espn.com
+            # page when we know its ESPN team ID (see _get_fantasy_team_info).
+            # No text color: Discord embed markdown has no way to set
+            # arbitrary text color (that's limited to ANSI codes inside a
+            # ```ansi code block, which would force the whole line into a
+            # monospaced, boxed code-block style rather than just coloring
+            # these few words) — bold+underline+link was chosen instead as
+            # the strongest emphasis available without that trade-off.
+            fantasy_line = f"**__{fantasy_team_name}__**"
+            if fantasy_team_url:
+                fantasy_line = f"**__[{fantasy_team_name}]({fantasy_team_url})__**"
+            detail_lines.append(fantasy_line)
         if sport == "nfl" and play_type == "Field Goal Good" and yards is not None:
             detail_lines.append(f"{yards}-yard field goal.")
         description = "\n".join(detail_lines) + "\n\n" + score_line if detail_lines else score_line
@@ -989,20 +1023,28 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
             compact=True,
             author_name=team,
             author_icon=scoring_team_logo,
-            thumbnail_fallback=opponent_logo,
+            thumbnail_fallback=scoring_team_logo,
         )
         await channel.send(embed=embed)
 
-    def _get_fantasy_team_name(self, guild_id: int, espn_player_id: int) -> str | None:
+    def _get_fantasy_team_info(self, guild_id: int, espn_player_id: int) -> tuple[str, str | None] | None:
         """
         Look up which fantasy team (if any) owns this player in the guild's
         cached ESPN Fantasy roster snapshot — see cogs/fantasy.py, which
-        populates fantasy_roster_entries on a daily refresh. Returns the
-        team's own name (e.g. "The Gridiron Gang"), not the manager's
-        personal display name — that's what gets called out in the scoring
-        embed. Returns None if the fantasy feature isn't configured for this
-        guild, or the player isn't on anyone's roster (free agent, or on a
-        team not in this league at all).
+        populates fantasy_roster_entries on a daily refresh.
+
+        Returns
+        -------
+        (team_name, team_url) | None
+            team_name is the fantasy team's own name (e.g. "The Gridiron
+            Gang"), not the manager's personal ESPN display name — that's
+            what gets called out in the scoring embed. team_url links to
+            the team's page on fantasy.espn.com, or None if either the
+            roster entry has no espn_team_id on file or this guild has no
+            fantasy league configured at all (so league_id/season aren't
+            known to build the URL). Returns None outright if the fantasy
+            feature isn't configured for this guild, or the player isn't on
+            anyone's roster (free agent, or on a team not in this league).
         """
         with SessionLocal() as session:
             entry = (
@@ -1010,7 +1052,21 @@ class SportsScoresCog(commands.Cog, name="SportsScores"):
                 .filter_by(guild_id=guild_id, espn_player_id=espn_player_id)
                 .first()
             )
-            return entry.team_name if entry else None
+            if entry is None:
+                return None
+
+            team_url = None
+            if entry.espn_team_id is not None:
+                league_cfg = session.query(FantasyLeagueConfig).filter_by(guild_id=guild_id).first()
+                if league_cfg and league_cfg.league_id:
+                    team_url = (
+                        "https://fantasy.espn.com/football/team"
+                        f"?leagueId={league_cfg.league_id}"
+                        f"&teamId={entry.espn_team_id}"
+                        f"&seasonId={league_cfg.season}"
+                    )
+
+            return entry.team_name, team_url
 
     async def _post_score_update(
         self,
